@@ -20,3 +20,6 @@ arduino-cli.yaml
 # OS
 .DS_Store
 Thumbs.db
+baremetal_bluetooth_serial_referencia.txt
+referencia_anterior_LVGL_paraimplementar_SPIFFS.txt
+credenciais.txt

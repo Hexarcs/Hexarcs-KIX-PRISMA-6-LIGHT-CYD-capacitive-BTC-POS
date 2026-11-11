@@ -17,7 +17,13 @@ A **Lightning Network point-of-sale (PoS) terminal** for the **ESP32**. It uses 
 - QR code rendering of the BOLT11 invoice (local `qrcode.c` library).
 - Automatic payment polling every 3 s (`GET /api/v1/payments/{hash}`).
 - Wallet balance check (`GET /api/v1/wallet`).
-- Serial (UART) command interface — control the device without touching the screen.
+- On-device **setup portal** — a small `WIFI` button opens a captive portal to
+  configure Wi-Fi, LNbits URL, API key and Bluetooth pairing PIN from a phone
+  browser.
+- A **`BT` toggle button** next to `WIFI` turns the Bluetooth serial server on/off.
+- Serial (UART) **and Bluetooth SPP** command interface — control the device from a
+  USB serial monitor or a phone's Bluetooth terminal app (pair with **`KIX-POS`**,
+  "Just Works" pairing — no PIN).
 - Vendored Arduino libraries (no external `lib install` required).
 
 ---
@@ -65,11 +71,11 @@ The display driver is configured in
         ├── TFT_eSPI/        2.5.43         # display driver
         ├── TAMC_GT911/      1.0.2          # GT911 touch driver
         ├── QRCode/          0.0.1          # QR (alternative; firmware uses qrcode.c)
-        └── WiFiManager/     2.0.17         # (bundled, not used by this firmware)
+        └── WiFiManager/     2.0.17         # AP-mode captive portal for Wi-Fi setup
 ```
 
-> `WiFiManager` is included in the folder but is **not** used by the current
-> firmware. It can be removed if you want an even smaller repository.
+> `WiFiManager` is used by the on-device `WIFI` button to open a captive portal
+> (AP mode) and store the chosen Wi-Fi credentials in NVS.
 
 ---
 
@@ -114,8 +120,30 @@ String lnbits_wallet_url  = "https://YOUR-LNBITS/api/v1/wallet";
 String lnbits_api_key     = "YOUR_X-API-KEY";
 ```
 
-> ⚠️ The credentials currently in the file are **rotated / revoked placeholders**.
-> Never commit a real `X-Api-Key`.
+> ⚠️ The credentials in the file are **placeholders** (`YOUR_WIFI_SSID`,
+> `YOUR_WIFI_PASSWORD`, `YOUR_X-API-KEY`, `https://YOUR-LNBITS/…`). Replace them
+> with your own values before flashing. Never commit a real `X-Api-Key`.
+
+> 💡 **Bluetooth + HTTPS heap warning:** the ESP32's TLS handshake needs a large
+> heap chunk, and running **Bluetooth Classic at the same time** can make HTTPS
+> calls fail (invoice creation works only with Bluetooth off). The firmware now
+> auto-detects `http://` vs `https://` in the URL: `http://` uses a lightweight
+> client and works alongside Bluetooth. If you want to use the Bluetooth terminal
+> **and** create invoices at the same time, point the endpoint at **`http://`**.
+> With `https://`, turn Bluetooth off (the `BT` button) before creating an invoice.
+
+**Over-the-air setup (no re-flash):** the `WIFI` button on the keypad opens a
+captive portal (`KIX-POS-Setup` / `kixpos123`). Connect a phone to that network,
+browse to `192.168.4.1` and enter the local Wi-Fi. The same page has fields for
+the **LNbits URL**, **API key** and **Bluetooth PIN** (pre-filled with the current
+values — leave them blank to keep the current ones). Everything is stored in NVS
+and used automatically on the next boot, falling back to the hardcoded values
+above only when nothing was saved.
+
+> ⚠️ **Bluetooth PIN note:** ESP32 Arduino core **3.x removed legacy fixed-PIN
+> pairing**, so the `Bluetooth PIN` field is currently **saved but not enforced** —
+> pairing uses "Just Works" (no PIN). A fixed PIN only works if the firmware is
+> rebuilt as an ESP-IDF component with `CONFIG_BT_SSP_ENABLED` disabled.
 
 ---
 
@@ -215,15 +243,37 @@ The original one-line command reference is also kept in
 4. The device auto-checks every 3 s (or press **CHECAR**) → shows **PAGO COM SUCESSO!**.
 5. Press **VOLTAR** to go back to the keypad.
 
-### Over the serial port (115200 baud)
+Tap **WIFI** (top-right of the keypad) to enter the Wi-Fi setup portal described
+above. The **`BT`** button next to it toggles the Bluetooth serial server on/off
+(green `BT ON` = on, grey `BT OFF` = off).
+
+### Over serial (USB or Bluetooth)
+
+The same commands work over the USB serial monitor (115200 baud) and over a
+**Bluetooth SPP** terminal — pair with the device named **`KIX-POS`** (pairing is
+"Just Works", no PIN; see the note in the setup section above).
 
 | Command  | Action                                       |
 |----------|----------------------------------------------|
 | `I:1500` | Create an invoice for 1500 sats              |
 | `C` / `C:`| Check the active invoice's payment status   |
 | `L` / `L:`| Query wallet balance                        |
+| `P` / `P:`| Print the active BOLT11 invoice (copy/paste) |
 | `H`      | Return to the home (keypad) screen           |
-| `H:`     | Print system status (Wi-Fi, IP, heap, PSRAM) |
+| `H:`     | Print system status (Wi-Fi, IP, BT, heap…)   |
+| `help`   | List all available commands                  |
+
+> 📱 **Bluetooth + TLS workaround:** Bluetooth and HTTPS can't share the ESP32's
+> memory at the same time, so before any TLS call (invoice, balance, check) the
+> device **turns Bluetooth off automatically** and warns you over the terminal to
+> reconnect in 10 s. Any operation requested **over Bluetooth** (`I:` invoice,
+> `C` check, `L` balance) turns Bluetooth back on by itself after **10 s**; for an
+> invoice, the automatic payment check also runs only for those 10 s and then
+> stops. Operations from the touchscreen or USB serial leave Bluetooth **off** —
+> tap the **`BT`** button to turn it back on. When a Bluetooth client reconnects,
+> the device reports the result over Bluetooth: `PAGO COM SUCESSO!` / the **BOLT11**
+> for an invoice, or the check/balance result for `C` / `L`. Type `help` for the
+> command list.
 
 Example:
 
@@ -252,14 +302,16 @@ states):
 | `SCREEN_PAID`       | "PAGO COM SUCESSO!"            |
 | `SCREEN_ERROR`      | Title + detail + VOLTAR button |
 
-The main `loop()` is **non-blocking** and runs five phases every iteration:
+The main `loop()` is **non-blocking** and runs seven phases every iteration:
 
-1. **Serial reception** — reads UART and dispatches `I:` / `C` / `L` / `H` / `H:`
-   commands.
+1. **Serial reception** — reads USB UART **and Bluetooth SPP**, dispatching
+   `I:` / `C` / `L` / `P` / `H` / `H:` commands to the same handler.
 2. **Touch** — reads the GT911 with 180 ms debounce and hit-tests the current screen.
 3. **Debug heartbeat** — prints a "loop alive" line every 30 s.
 4. **Auto-check** — if on the QR screen, polls the invoice every 3 s.
 5. **Auto-return** — 5 s after "PAID", returns to the keypad.
+6. **BT auto-re-enable** — for a Bluetooth-requested operation (invoice/check/balance), turns Bluetooth back on after 10 s (for invoices, the auto-check also stops at 10 s; USB/touch keep auto-checking).
+7. **BT report** — once a client reconnects, reports `PAGO` / not-paid + BOLT11.
 
 ### Network flow (LNbits)
 

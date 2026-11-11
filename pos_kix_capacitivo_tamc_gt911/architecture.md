@@ -38,7 +38,7 @@ mesmo fluxo por comandos de texto.
    │                    |  TFT_BL   ──────────────────► Backlight|
    │                    |                                        |
    │                    |  WiFi/HTTPS (insecure) ──────► LNbits  |
-   │                    |         engine-1.hexarcs.com           |
+   │                    |         YOUR-LNBITS           |
    └────────────────────┘                                        |
                         +----------------------------------------+
 
@@ -52,12 +52,16 @@ mesmo fluxo por comandos de texto.
 |-------------------|---------------------------------------------------|------------------|
 | Display           | `TFT_eSPI`, rotação `2` (portrait), 240×320       | via SPI + `TFT_BL` |
 | Touch capacitivo  | `TAMC_GT911`, 240×320                             | SDA=33, SCL=32, INT=21, RST=25 |
-| Rede              | Wi-Fi + `HTTPClient`/`WiFiClientSecure`           | —                |
+| Rede              | Wi-Fi + `HTTPClient` (`WiFiClient`/`WiFiClientSecure` adaptativo) | — |
+| Bluetooth         | `BluetoothSerial` (SPP), pareamento Just Works    | —                |
 | JSON              | `ArduinoJson`                                     | —                |
 | QR Code           | `qrcode.h` (versão 14, `ECC_LOW`)                 | —                |
 
-> A comunicação TLS usa `client.setInsecure()` (sem validação de certificado),
-> o que é explicitamente marcado no código como modo de diagnóstico (linha 361).
+> O transporte é escolhido pela URL: `http://` usa `WiFiClient` (leve) e `https://`
+> usa `WiFiClientSecure` com `setInsecure()` (sem validar o certificado — modo de
+> diagnóstico). **HTTPS + Bluetooth ligado pode estourar o heap do ESP32** e fazer
+> a criação de invoice falhar; para usar Bluetooth e invoice ao mesmo tempo, use um
+> endpoint `http://` (como o projeto baremetal) ou desligue o BT.
 
 ---
 
@@ -150,9 +154,9 @@ Endpoints (linhas 14–16):
 
 | Operação        | Método | URL                                                        |
 |-----------------|--------|------------------------------------------------------------|
-| Criar invoice   | `POST` | `https://engine-1.hexarcs.com/api/v1/payments`             |
+| Criar invoice   | `POST` | `https://YOUR-LNBITS/api/v1/payments`             |
 | Verificar invoice| `GET` | `.../api/v1/payments/{payment_hash}`                       |
-| Saldo da carteira| `GET` | `https://engine-1.hexarcs.com/api/v1/wallet`               |
+| Saldo da carteira| `GET` | `https://YOUR-LNBITS/api/v1/wallet`               |
 
 Autenticação via header `X-Api-Key` (chave hardcoded, linha 16).
 
@@ -231,17 +235,21 @@ bater entre si:
 
 ---
 
-## 6. Interface serial (UART 115200 baud)
+## 6. Interface serial (UART 115200 baud + Bluetooth SPP)
 
-Comandos interpretados no `loop()` (linhas 852–947), terminados por `\n` ou `\r`:
+A mesma sintaxe é aceita pelo **USB serial** e por um terminal **Bluetooth SPP**
+(pareie com o dispositivo **`KIX-POS`**; pareamento "Just Works", sem PIN — o core
+3.x não suporta PIN fixo). Comandos terminados por `\n` ou `\r`:
 
 | Comando       | Ação                                        | Função chamada            |
 |---------------|---------------------------------------------|---------------------------|
 | `I:<valor>`   | Cria invoice com o valor em sats           | `createInvoice()`         |
 | `C` / `C:`    | Verifica pagamento da invoice ativa        | `manualCheck()`           |
 | `L` / `L:`    | Consulta saldo da carteira                 | `checkBalance()`          |
+| `P` / `P:`    | Imprime a invoice BOLT11 ativa             | (direto no stream)        |
 | `H`           | Volta para a tela inicial (teclado)        | `desenharTelaTeclado()`   |
 | `H:`          | Mostra status do sistema                   | `mostrarInformacoesSistema()` |
+| `help`         | Lista os comandos disponíveis          | (direto no stream)        |
 
 Exemplo de fluxo serial:
 
@@ -270,15 +278,27 @@ Exemplo de fluxo serial:
 | `desenharTelaPago()`            | Tela verde de sucesso                                         |
 | `desenharTelaErro(titulo, det)` | Tela de erro com botão VOLTAR                                 |
 | `connectWiFi()`                 | Conecta ao Wi-Fi (timeout 15 s) e vai ao teclado              |
-| `checkBalance()`                | Consulta saldo da carteira                                   |
+| `iniciarConfiguracaoWiFi()` | Abre portal AP (WiFiManager) p/ Wi-Fi, API e PIN           |
+| `carregarConfigLNbits()`    | Carrega URL/key/PIN do NVS (fallback: hardcoded)           |
+| `salvarConfigLNbits()`      | Grava URL/key/PIN no NVS                                   |
+| `iniciarBluetooth()`        | Liga o Bluetooth SPP (pareamento Just Works, sem PIN)         |
+| `alternarBluetooth()`       | Liga/desliga o Bluetooth (botão BT) e redesenha o teclado   |
+| `prepararHTTP(...)`        | Escolhe `WiFiClient`/`WiFiClientSecure` conforme a URL       |
+| `desligarBTParaTLS(avisarVoltar10s)` | Desliga o BT (se ligado) antes de uma operação HTTPS; avisa "volte em 10s" se veio do BT          |
+| `solicitarInvoice(sats, origemBT)` | Desliga o BT, cria a invoice; religa em 10s (e encerra o auto-check) se veio do BT |
+| `reportarStatusInvoiceBT()`| Reporta PAGO / não pago + BOLT11 ao cliente BT reconectado    |
+| `agendarResultadoBT(msg)` | Agenda um resultado para enviar ao cliente BT após reconectar |
+| `checkBalance(origemBT)` | Consulta saldo da carteira; religa o BT em 10s se veio do BT                                   |
 | `createInvoice(sats)`           | Cria invoice na LNbits e mostra QR                            |
-| `manualCheck()`                 | Verificação manual de pagamento                              |
+| `manualCheck(origemBT)` | Verificação manual de pagamento; religa o BT em 10s se veio do BT                              |
 | `verificarPagamentoSilencioso()`| Poll automático de pagamento (silencioso)                    |
 | `adicionarDigito(c)` / `apagarDigito()` | Edição do valor no teclado                          |
 | `processarOK()`                 | Valida valor, salva `current_sats` e cria invoice            |
 | `tratarToque(px, py)`           | Hit-test do touch por tela                                   |
 | `verificarTouch()`              | Leitura + debounce do GT911                                  |
-| `mostrarInformacoesSistema()`   | Dump de status (Wi-Fi, IP, heap, PSRAM…) no Serial           |
+| `mostrarInformacoesSistema(out)`| Dump de status (Wi-Fi, IP, Bluetooth, heap…) no stream       |
+| `despacharComando(input, out)`  | Roteia um comando serial para a ação correspondente          |
+| `lerComando(in, buf, out)`      | Lê uma linha de um stream (USB ou BT) e despacha             |
 
 ---
 
@@ -291,6 +311,14 @@ Exemplo de fluxo serial:
 | `current_sats`           | `long`    | Valor da invoice ativa                        |
 | `current_payment_hash`   | `String`  | `payment_hash` da invoice ativa               |
 | `current_bolt11`         | `String`  | Invoice BOLT11 (exibida como QR)              |
+| `btHabilitado`           | `bool`    | Bluetooth ligado/desligado (botão BT)          |
+| `bt_pin`                 | `String`  | PIN de pareamento (salvo, não aplicado no core 3.x) |
+| `pagamentoConfirmado`    | `bool`    | resultado do último invoice (pago?)                 |
+| `relatorioBTpendente`    | `bool`    | há resultado a reportar ao cliente BT após reconectar |
+| `btAutoReligarEm`        | `unsigned long` | religa o BT automaticamente (só invoice via BT) |
+| `autoCheckAte`           | `unsigned long` | auto-check roda só até este instante (0 = sem limite; só invoice via BT tem limite) |
+| `bolt11Relatorio`        | `String`  | cópia do BOLT11 para o reporte pós-BT               |
+| `relatorioBTTexto`     | `String`  | resultado a reportar ao cliente BT após reconectar (C/L) |
 
 ---
 
@@ -298,9 +326,10 @@ Exemplo de fluxo serial:
 
 - **Credenciais hardcoded** (SSID, senha Wi-Fi e `X-Api-Key` da LNbits) estão no
   código-fonte (linhas 11–16). Em produção, devem vir de config/NVS/secret store.
-- **TLS inseguro**: `client.setInsecure()` desabilita a validação do certificado
-  (linhas 372, 467, 566, 646). O próprio código recomenda validar o certificado
-  após confirmar a comunicação.
+- **TLS inseguro**: no modo `https://`, `client.setInsecure()` desabilita a
+  validação do certificado. O próprio código recomenda validar o certificado após
+  confirmar a comunicação. Para coexistir com o Bluetooth, prefira um endpoint
+  `http://` (veja a nota de heap na seção de recursos).
 - **`String` para concatenação de JSON**: o payload é montado manualmente
   (linha 486). Usar `ArduinoJson` para serializar evitaria risco de injeção/corrupção
   de formato (o valor vem de `long`, então o risco aqui é baixo).
@@ -320,6 +349,6 @@ pos_kix_capacitivo_tamc_gt911/
     ├── TFT_eSPI/        ← driver do display
     ├── TAMC_GT911/      ← driver do touch capacitivo
     ├── ArduinoJson/     ← parse/serialize JSON
-    ├── WiFiManager/     ← (incluída, mas não usada neste firmware)
+    ├── WiFiManager/     ← portal AP (botão WIFI) para configurar Wi-Fi
     └── QRCode/          ← QR (alternativa à qrcode.c local)
 ```

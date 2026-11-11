@@ -3,17 +3,30 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
+#include <BluetoothSerial.h>
+// WiFiManager (e o WebServer que ele usa) deve ser incluído ANTES do TFT_eSPI:
+// o TFT_eSPI (com SMOOTH_FONT) define FS_NO_GLOBALS, o que remove o alias global
+// "FS" de FS.h. Incluir o WiFiManager primeiro evita "FS was not declared" no
+// WebServer da placa (ESP32 core 3.x).
+#include <WiFiManager.h>
+#include <Preferences.h>
 #include <TFT_eSPI.h>
 #include "TAMC_GT911.h"
 #include "qrcode.h"
 
 /* --- CONFIGURAÇÃO WI-FI E LNBITS --- */
-const char* ssid = "Vinicius";
-const char* password = "@V112233r";
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
 
-String lnbits_url = "https://engine-1.hexarcs.com/api/v1/payments";
-String lnbits_wallet_url = "https://engine-1.hexarcs.com/api/v1/wallet";
-String lnbits_api_key = "5e3e9788bd634d82882f849d7fba3b54";
+/* --- CREDENCIAIS DO PORTAL DE CONFIGURAÇÃO (AP MODE) --- */
+// Rede que a placa abre quando o botão "WIFI" é tocado.
+// O cliente conecta o celular nessa rede e configura o WiFi pelo navegador.
+const char* WIFI_AP_SSID = "KIX-POS-Setup";
+const char* WIFI_AP_PASS = "kixpos123";
+
+String lnbits_url = "https://YOUR-LNBITS/api/v1/payments";
+String lnbits_wallet_url = "https://YOUR-LNBITS/api/v1/wallet";
+String lnbits_api_key = "YOUR_X-API-KEY";
 
 /* --- DEFINIÇÕES DE PINOS DO TOUCH CAPACITIVO (GT911) --- */
 #define TOUCH_SDA 33
@@ -26,6 +39,11 @@ String lnbits_api_key = "5e3e9788bd634d82882f849d7fba3b54";
 /* --- OBJETOS DE HARDWARE --- */
 TAMC_GT911 tp = TAMC_GT911(TOUCH_SDA, TOUCH_SCL, TOUCH_INT, TOUCH_RST, TOUCH_WIDTH, TOUCH_HEIGHT);
 TFT_eSPI tft = TFT_eSPI();
+
+/* --- SERIAL BLUETOOTH (SPP) --- */
+BluetoothSerial SerialBT;
+bool btHabilitado = true;   // estado atual do Bluetooth (true = ligado)
+String bt_pin = "1234";     // PIN de pareamento (padrão hardcoded)
 
 /* --- ESTADOS DAS TELAS --- */
 enum ScreenState {
@@ -50,6 +68,14 @@ unsigned long lastAutoCheckTime = 0;
 unsigned long paidScreenTime = 0;
 bool wasTouched = false;
 
+/* --- BLUETOOTH DESLIGADO AUTOMATICAMENTE P/ OPERAÇÕES TLS --- */
+bool pagamentoConfirmado = false;    // resultado do último invoice (true = pago)
+bool relatorioBTpendente = false;    // há resultado a reportar ao cliente BT após reconectar
+unsigned long btAutoReligarEm = 0;   // religa o BT automaticamente neste instante (só invoice via BT)
+unsigned long autoCheckAte = 0;      // auto-check roda só até este instante (0 = sem limite; só invoice via BT tem limite)
+String bolt11Relatorio = "";         // cópia do BOLT11 para o reporte (sobrevive ao VOLTAR/auto-return)
+String relatorioBTTexto = "";        // resultado a reportar ao cliente BT após reconectar (C/L)
+
 /* --- DECLARAÇÃO DE FUNÇÕES --- */
 void kickstartHardware();
 void desenharBotao(int x, int y, int w, int h, const char* texto, uint16_t corFundo, uint16_t corTexto = 0xFFFF, uint8_t textSize = 2);
@@ -61,16 +87,27 @@ void desenharTelaQRCode();
 void desenharTelaPago();
 void desenharTelaErro(String titulo, String detalhe);
 void connectWiFi();
-void checkBalance();
+void checkBalance(bool origemBT = false);
 void createInvoice(int sats);
-void manualCheck();
+void manualCheck(bool origemBT = false);
 void verificarPagamentoSilencioso();
 void adicionarDigito(char d);
 void apagarDigito();
 void processarOK();
 void tratarToque(int px, int py);
 void verificarTouch();
-void mostrarInformacoesSistema();
+void mostrarInformacoesSistema(Print& out = Serial);
+void iniciarConfiguracaoWiFi();
+void carregarConfigLNbits();
+void salvarConfigLNbits();
+void iniciarBluetooth();
+void alternarBluetooth();
+void desligarBTParaTLS(bool avisarVoltar10s = false);
+void solicitarInvoice(int sats, bool origemBT);
+void reportarStatusInvoiceBT();
+void agendarResultadoBT(const String& msg);
+void despacharComando(const String& input, Print& out);
+void lerComando(Stream& in, String& buffer, Print& out);
 
 /* --- FUNÇÕES DE HARDWARE --- */
 void kickstartHardware() {
@@ -124,16 +161,23 @@ void desenharTelaTeclado() {
 
   tft.setTextColor(0xFDA0, 0x0000);
   tft.setTextSize(2);
-  tft.drawString("KIX POS", 10, 10);
+  tft.drawString("KIX POS", 8, 8);
 
   tft.setTextSize(1);
   if (WiFi.status() == WL_CONNECTED) {
     tft.setTextColor(0x07E0, 0x0000);
-    tft.drawString("ONLINE", 180, 14);
+    tft.drawString("ONLINE", 8, 30);
   } else {
     tft.setTextColor(0xF800, 0x0000);
-    tft.drawString("OFFLINE", 175, 14);
+    tft.drawString("OFFLINE", 8, 30);
   }
+
+  // Botão Bluetooth (liga/desliga) — canto superior direito, ao lado do WIFI
+  desenharBotao(98, 6, 62, 28, btHabilitado ? "BT ON" : "BT OFF",
+                btHabilitado ? 0x05E0 : 0x4208, 0xFFFF, 1);
+
+  // Botão pequeno de configuração WiFi (canto superior direito)
+  desenharBotao(168, 6, 64, 28, "WIFI", 0x2124, 0xFFFF, 2);
 
   atualizarVisor();
 
@@ -240,6 +284,7 @@ void desenharTelaQRCode() {
 
 /* --- TELA 3: PAGAMENTO CONFIRMADO --- */
 void desenharTelaPago() {
+  pagamentoConfirmado = true;   // registra o resultado p/ o reporte pós-BT
   currentScreen = SCREEN_PAID;
   paidScreenTime = millis();
   tft.fillScreen(0x05E0);
@@ -305,9 +350,9 @@ void processarOK() {
     return;
   }
 
-  current_sats = sats;
+  current_sats = sats;         // atualiza ANTES da tela de loading (mostra o valor certo)
   desenharTelaCarregando();
-  createInvoice(sats);
+  solicitarInvoice(sats, false);
 }
 
 /* --- REDE E COMUNICAÇÃO LNBITS --- */
@@ -333,7 +378,21 @@ void connectWiFi() {
   tft.println(ssid);
 
   if (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(ssid, password);
+    // Tenta primeiro as credenciais salvas pelo portal (armazenadas em NVS).
+    WiFiManager wm;
+    String savedSSID = wm.getWiFiSSID();
+    String savedPass = wm.getWiFiPass();
+
+    if (savedSSID.length() > 0) {
+      Serial.print("[WIFI] Usando credenciais salvas: ");
+      Serial.println(savedSSID);
+      WiFi.begin(savedSSID.c_str(), savedPass.c_str());
+    } else {
+      Serial.print("[WIFI] Usando credenciais padrao: ");
+      Serial.println(ssid);
+      WiFi.begin(ssid, password);
+    }
+
     unsigned long startAttemptTime = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 15000) {
       delay(500);
@@ -358,31 +417,307 @@ void connectWiFi() {
   desenharTelaTeclado();
 }
 
-// Cliente HTTPS: modo insecure usado aqui para diagnóstico.
-// Depois de confirmar a comunicação, recomendamos validar o certificado TLS.
-void checkBalance() {
+/* --- CONFIGURAÇÃO DE WIFI VIA AP MODE (PORTAL CAPTIVO) --- */
+// Chamada quando o botão "WIFI" é tocado. Coloca a placa em modo AP e abre um
+// portal captivo: o cliente conecta o celular na rede "KIX-POS-Setup", abre o
+// navegador (192.168.4.1) e informa o SSID/senha do WiFi do local. As
+// credenciais ficam salvas em NVS e são usadas no próximo boot.
+void iniciarConfiguracaoWiFi() {
+  Serial.println("\n[WIFI] Entrando em modo de configuracao (AP)...");
+
+  // Limpa o estado de pagamento atual antes de abrir o portal
+  current_payment_hash = "";
+  current_bolt11 = "";
+  input_amount = "";
+
+  // Tela de instruções para o cliente
+  tft.fillScreen(0x0000);
+
+  tft.setTextColor(0xFFE0, 0x0000);
+  tft.setTextSize(2);
+  tft.drawCentreString("MODO SETUP WIFI", 120, 20, 1);
+
+  tft.setTextColor(0xFFFF, 0x0000);
+  tft.drawCentreString("1. No celular,", 120, 60, 1);
+  tft.drawCentreString("conecte na rede:", 120, 82, 1);
+
+  tft.setTextColor(0x07FF, 0x0000);
+  tft.drawCentreString(WIFI_AP_SSID, 120, 110, 1);
+
+  tft.setTextColor(0xFFFF, 0x0000);
+  tft.drawCentreString("2. Abra o navegador", 120, 150, 1);
+  tft.drawCentreString("e acesse:", 120, 172, 1);
+
+  tft.setTextColor(0x07FF, 0x0000);
+  tft.drawCentreString("192.168.4.1", 120, 200, 1);
+
+  tft.setTextColor(0x7BEF, 0x0000);
+  tft.drawCentreString("3. Escolha o WiFi", 120, 240, 1);
+  tft.drawCentreString("e digite a senha", 120, 262, 1);
+
+  tft.setTextSize(1);
+  tft.drawCentreString("Opcional: URL, chave da API e PIN BT", 120, 292, 1);
+
+  // Abre o portal de configuração (bloqueante até salvar ou dar timeout)
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180); // 3 minutos
+  wm.setSaveConfigCallback([]() {
+    Serial.println("[WIFI] Credenciais salvas pelo portal.");
+  });
+
+  // Campos extras no portal: endpoint, chave da API LNbits e PIN do Bluetooth.
+  // Pré-preenchidos com os valores atuais; se ficarem vazios, mantém o atual.
+  WiFiManagerParameter p_url("lnbits_url", "LNbits URL", lnbits_url.c_str(), 120);
+  WiFiManagerParameter p_key("lnbits_key", "LNbits API Key", lnbits_api_key.c_str(), 80);
+  WiFiManagerParameter p_pin("bt_pin", "Bluetooth PIN", bt_pin.c_str(), 16);
+  wm.addParameter(&p_url);
+  wm.addParameter(&p_key);
+  wm.addParameter(&p_pin);
+
+  bool ok = wm.startConfigPortal(WIFI_AP_SSID, WIFI_AP_PASS);
+
+  Serial.print("[WIFI] Portal encerrado: ");
+  Serial.println(ok ? "sucesso" : "timeout/cancelado");
+
+  // Aplica os valores de API digitados no portal (vazio/inválido = mantém o atual)
+  String novaUrl = String(p_url.getValue());
+  String novaKey = String(p_key.getValue());
+  String novoPin = String(p_pin.getValue());
+  novaUrl.trim();
+  novaKey.trim();
+  novoPin.trim();
+
+  if (novaUrl.length() > 0 && novaUrl.startsWith("http")) {
+    lnbits_url = novaUrl;
+  }
+  if (novaKey.length() > 0) {
+    lnbits_api_key = novaKey;
+  }
+  // PIN do Bluetooth: 1 a 16 bytes (padrão hardcoded "1234" se vazio/inválido).
+  // Obs.: o core 3.x não aplica PIN fixo no pareamento (ver iniciarBluetooth),
+  // então o valor é apenas salvo no NVS para uso futuro / build customizada.
+  if (novoPin.length() >= 1 && novoPin.length() <= 16) {
+    bt_pin = novoPin;
+  }
+
+  salvarConfigLNbits();
+  Serial.print("[WIFI] URL: "); Serial.println(lnbits_url);
+  Serial.print("[WIFI] KEY: "); Serial.println(lnbits_api_key);
+  Serial.print("[WIFI] PIN BT (salvo, nao aplicado no core 3.x): "); Serial.println(bt_pin);
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[WIFI] Conectado com as novas credenciais.");
+    Serial.print("[WIFI] SSID: ");
+    Serial.println(WiFi.SSID());
+  } else {
+    Serial.println("[WIFI] Sem conexao apos o portal. Tentando credenciais padrao...");
+    connectWiFi();
+    return;
+  }
+
+  desenharTelaTeclado();
+}
+
+/* --- PERSISTÊNCIA DAS CONFIGS LNBITS + PIN BT (NVS) --- */
+// Carrega URL/key/PIN salvos no NVS. Se não existirem (ou forem inválidos),
+// mantém os valores hardcoded do topo do arquivo.
+void carregarConfigLNbits() {
+  Preferences prefs;
+  if (!prefs.begin("kixpos", true)) { // somente leitura
+    Serial.println("[CONFIG] NVS indisponivel; mantendo valores hardcoded.");
+    return;
+  }
+
+  String url = prefs.getString("lnbits_url", "");
+  String key = prefs.getString("lnbits_key", "");
+  String pin = prefs.getString("bt_pin", "1234");
+  prefs.end();
+
+  url.trim();
+  key.trim();
+  pin.trim();
+
+  if (url.length() > 0 && url.startsWith("http")) {
+    lnbits_url = url;
+  }
+  if (key.length() > 0) {
+    lnbits_api_key = key;
+  }
+  if (pin.length() >= 1 && pin.length() <= 16) {
+    bt_pin = pin;
+  }
+
+  Serial.println("[CONFIG] Config carregada do NVS:");
+  Serial.print("  URL: "); Serial.println(lnbits_url);
+  Serial.print("  KEY: "); Serial.println(lnbits_api_key);
+  Serial.print("  PIN BT: "); Serial.println(bt_pin);
+}
+
+// Grava URL/key/PIN atuais no NVS.
+void salvarConfigLNbits() {
+  Preferences prefs;
+  if (!prefs.begin("kixpos", false)) { // leitura/escrita
+    Serial.println("[CONFIG] Nao foi possivel abrir NVS para gravacao.");
+    return;
+  }
+
+  prefs.putString("lnbits_url", lnbits_url);
+  prefs.putString("lnbits_key", lnbits_api_key);
+  prefs.putString("bt_pin", bt_pin);
+  prefs.end();
+
+  Serial.println("[CONFIG] Config salva no NVS.");
+}
+
+/* --- CONTROLE DO BLUETOOTH (liga/desliga + PIN) --- */
+// Liga o Bluetooth SPP (se ainda não estiver ligado).
+//
+// NOTA IMPORTANTE: o core ESP32 Arduino 3.x NÃO suporta mais pareamento legado
+// com PIN fixo (SerialBT.setPin(...)). A própria lib avisa "Since version 3.0.0
+// this library does not support legacy pairing (fixed PIN)". Chamar setPin() aqui
+// deixava o pareamento/SPP inconsistente e o celular caía com "socket closed /
+// read ret:-1". Por isso usamos o pareamento padrão "Just Works" (sem PIN), igual
+// ao exemplo oficial SerialToSerialBT. O valor de bt_pin continua salvo no NVS
+// (campo do portal), mas só é aplicado se o firmware for compilado como IDF
+// component com CONFIG_BT_SSP_ENABLED desabilitado.
+void iniciarBluetooth() {
+  if (SerialBT.begin("KIX-POS", false, true)) {
+    btHabilitado = true;
+    Serial.println("[BT] Bluetooth ligado. Pareie como 'KIX-POS' (pareamento Just Works, sem PIN).");
+  } else {
+    btHabilitado = false;
+    Serial.println("[BT][ERRO] Falha ao iniciar Bluetooth.");
+  }
+}
+
+// Alterna o estado do Bluetooth. Desliga com end() (libera o stack sem precisar
+// de reset; ao contrário de memrelease(), permite religar depois).
+void alternarBluetooth() {
+  if (btHabilitado) {
+    SerialBT.end();
+    btHabilitado = false;
+    Serial.println("[BT] Bluetooth desligado.");
+  } else {
+    iniciarBluetooth();
+  }
+  desenharTelaTeclado(); // atualiza o rótulo/cor do botão BT
+}
+
+// Prepara um HTTPClient para a URL, escolhendo o transporte conforme o esquema:
+//   - http://  -> WiFiClient (leve). ESSENCIAL para gerar invoice com o Bluetooth
+//                 ligado: o TLS/mbedTLS do HTTPS consome ~40-60 KB de heap e, junto
+//                 com o Bluetooth Classic, estoura/fragmenta a memória do ESP32,
+//                 fazendo a conexão HTTPS falhar quando o BT está ativo.
+//   - https:// -> WiFiClientSecure (TLS). Usa setInsecure() (sem validar o
+//                 certificado) — modo de diagnóstico; consome mais heap.
+// Retorna true se http.begin() teve sucesso.
+bool prepararHTTP(HTTPClient& http, const String& url, WiFiClient& plain, WiFiClientSecure& secure, int timeoutMs) {
+  http.setReuse(false);
+  http.setTimeout(timeoutMs);
+
+  if (url.startsWith("https://")) {
+    secure.setInsecure();
+    secure.setTimeout(timeoutMs);
+    return http.begin(secure, url);
+  }
+
+  plain.setTimeout(timeoutMs);
+  return http.begin(plain, url);
+}
+
+// Desliga o Bluetooth se estiver ligado, para liberar memória antes de uma
+// operação TLS/HTTPS (invoice, saldo, checagem). Quando avisarVoltar10s é true
+// (operação vinda do BT), avisa o cliente para se reconectar em 10s; senão, o
+// usuário deve tocar no botão BT para religar manualmente.
+void desligarBTParaTLS(bool avisarVoltar10s) {
+  if (!btHabilitado) return;
+
+  if (SerialBT.hasClient()) {
+    SerialBT.println("\n[BT] Operacao segura (TLS) detectada.");
+    SerialBT.println("[BT] Bluetooth sera desligado para liberar memoria.");
+    if (avisarVoltar10s) {
+      SerialBT.println("[BT] Voce pode se reconectar em 10 segundos.");
+    } else {
+      SerialBT.println("[BT] Religue manualmente pelo botao BT quando quiser.");
+    }
+  }
+
+  SerialBT.end();
+  btHabilitado = false;
+  Serial.println("[BT] Bluetooth desligado automaticamente (necessario p/ HTTPS).");
+}
+
+// Fluxo do invoice: desliga o BT (se preciso) antes de criar a invoice via TLS.
+// Para invoice originada no Bluetooth (origemBT), o auto-check roda só por 10s,
+// depois para e o BT religa sozinho; para touch/USB, o auto-check segue sem limite
+// e o BT fica desligado até o usuário tocar no botão BT.
+void solicitarInvoice(int sats, bool origemBT) {
+  pagamentoConfirmado = false;
+  bolt11Relatorio = "";
+  relatorioBTTexto = "";
+  relatorioBTpendente = (btHabilitado && SerialBT.hasClient());
+  btAutoReligarEm = 0;   // limpa qualquer timer anterior
+  autoCheckAte = 0;      // padrão: auto-check sem limite (touch/USB)
+
+  desligarBTParaTLS(origemBT);
+  current_sats = sats;
+  createInvoice(sats);
+
+  // Exceção: invoice vinda do BT — 10s de auto-check, depois para e religa o BT.
+  if (origemBT && relatorioBTpendente) {
+    btAutoReligarEm = millis() + 10000;
+    autoCheckAte = millis() + 10000;
+  }
+}
+
+// Envia ao cliente BT o resultado do invoice (pago / não pago + BOLT11).
+void reportarStatusInvoiceBT() {
+  SerialBT.println("\n[BT] === RESULTADO DO INVOICE ===");
+  if (pagamentoConfirmado) {
+    SerialBT.println("[BT] PAGO COM SUCESSO!");
+  } else if (bolt11Relatorio.length() > 0) {
+    SerialBT.println("[BT] AINDA NAO PAGO. Fatura BOLT11:");
+    SerialBT.println("\n--- START BOLT11 ---");
+    SerialBT.print(bolt11Relatorio);
+    SerialBT.println("\n--- END BOLT11 ---");
+  } else {
+    SerialBT.println("[BT] FALHA AO CRIAR A INVOICE (sem BOLT11).");
+  }
+}
+
+// Agenda uma mensagem de resultado para ser enviada ao cliente BT após reconectar
+// (usada por C/L, já que o BT fica desligado durante o HTTPS e religa em 10s).
+void agendarResultadoBT(const String& msg) {
+  relatorioBTTexto = msg;
+  relatorioBTpendente = true;
+}
+
+void checkBalance(bool origemBT) {
   Serial.println("\n[WALLET] Iniciando consulta de saldo...");
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[WALLET][ERRO] Wi-Fi desconectado.");
     desenharTelaErro("SEM WIFI", "Verifique a conexao");
+    if (origemBT) agendarResultadoBT("[BT] SEM WIFI - Verifique a conexao.");
     return;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(15000);
+  desligarBTParaTLS(origemBT);   // libera heap antes do HTTPS
+  if (origemBT) {
+    btAutoReligarEm = millis() + 10000;   // religa o BT sozinho após a consulta
+  }
 
+  WiFiClient plain;
+  WiFiClientSecure secure;
   HTTPClient http;
-  http.setTimeout(15000);
-  http.setReuse(false);
 
   Serial.print("[WALLET] GET ");
   Serial.println(lnbits_wallet_url);
 
-  if (!http.begin(client, lnbits_wallet_url)) {
+  if (!prepararHTTP(http, lnbits_wallet_url, plain, secure, 15000)) {
     Serial.println("[WALLET][ERRO] http.begin() falhou.");
     desenharTelaErro("ERRO HTTP", "Falha ao iniciar");
+    if (origemBT) agendarResultadoBT("[BT] ERRO HTTP - Falha ao iniciar.");
     return;
   }
 
@@ -408,6 +743,7 @@ void checkBalance() {
         Serial.println(jsonError.c_str());
         http.end();
         desenharTelaErro("ERRO JSON", "Resposta invalida");
+        if (origemBT) agendarResultadoBT("[BT] ERRO JSON - Resposta invalida.");
         return;
       }
 
@@ -415,6 +751,7 @@ void checkBalance() {
         Serial.println("[WALLET][ERRO] Campo balance_msat ausente.");
         http.end();
         desenharTelaErro("ERRO JSON", "Saldo nao encontrado");
+        if (origemBT) agendarResultadoBT("[BT] ERRO - Saldo nao encontrado.");
         return;
       }
 
@@ -423,6 +760,8 @@ void checkBalance() {
       Serial.print("[WALLET] Saldo: ");
       Serial.print(balance);
       Serial.println(" sats");
+
+      if (origemBT) agendarResultadoBT("[BT] Saldo da carteira: " + String(balance) + " sats");
 
       http.end();
 
@@ -448,6 +787,7 @@ void checkBalance() {
 
   http.end();
   desenharTelaErro("ERRO NA CARTEIRA", "HTTP " + String(code));
+  if (origemBT) agendarResultadoBT("[BT] ERRO NA CARTEIRA: HTTP " + String(code));
 }
 
 
@@ -463,18 +803,14 @@ void createInvoice(int sats) {
     return;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(20000);
-
+  WiFiClient plain;
+  WiFiClientSecure secure;
   HTTPClient http;
-  http.setTimeout(20000);
-  http.setReuse(false);
 
   Serial.print("[INVOICE] Endpoint: ");
   Serial.println(lnbits_url);
 
-  if (!http.begin(client, lnbits_url)) {
+  if (!prepararHTTP(http, lnbits_url, plain, secure, 20000)) {
     Serial.println("[INVOICE][ERRO] http.begin() falhou.");
     desenharTelaErro("ERRO HTTP", "Falha ao iniciar");
     return;
@@ -527,6 +863,8 @@ void createInvoice(int sats) {
       return;
     }
 
+    bolt11Relatorio = current_bolt11;   // cópia p/ o reporte pós-BT (sobrevive ao VOLTAR/auto-return)
+
     Serial.println("[INVOICE] Invoice criada com sucesso.");
     Serial.print("[INVOICE] BOLT11 recebido (");
     Serial.print(current_bolt11.length());
@@ -546,39 +884,43 @@ void createInvoice(int sats) {
 }
 
 
-void manualCheck() {
+void manualCheck(bool origemBT) {
   Serial.println("\n[CHECK] Verificacao manual solicitada.");
 
   if (current_payment_hash == "") {
     Serial.println("[CHECK] Nao existe invoice ativa.");
     updateQRStatus("SEM INVOICE", 0xF800);
+    if (origemBT) agendarResultadoBT("[BT] Nao existe invoice ativa.");
     return;
   }
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[CHECK][ERRO] Wi-Fi desconectado.");
     updateQRStatus("SEM WIFI", 0xF800);
+    if (origemBT) agendarResultadoBT("[BT] SEM WIFI - Verifique a conexao.");
     return;
+  }
+
+  desligarBTParaTLS(origemBT);   // libera heap antes do HTTPS
+  if (origemBT) {
+    btAutoReligarEm = millis() + 10000;   // religa o BT sozinho após a checagem
   }
 
   updateQRStatus("CHECANDO...", 0xFFE0);
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(15000);
-
+  WiFiClient plain;
+  WiFiClientSecure secure;
   HTTPClient http;
-  http.setTimeout(15000);
-  http.setReuse(false);
 
   String checkUrl = lnbits_url + "/" + current_payment_hash;
 
   Serial.print("[CHECK] GET ");
   Serial.println(checkUrl);
 
-  if (!http.begin(client, checkUrl)) {
+  if (!prepararHTTP(http, checkUrl, plain, secure, 15000)) {
     Serial.println("[CHECK][ERRO] http.begin() falhou.");
     updateQRStatus("ERRO AO CONECTAR", 0xF800);
+    if (origemBT) agendarResultadoBT("[BT] ERRO AO CONECTAR.");
     return;
   }
 
@@ -603,6 +945,7 @@ void manualCheck() {
       Serial.println(jsonError.c_str());
       http.end();
       updateQRStatus("ERRO NA RESPOSTA", 0xF800);
+      if (origemBT) agendarResultadoBT("[BT] ERRO NA RESPOSTA (JSON invalido).");
       return;
     }
 
@@ -612,11 +955,13 @@ void manualCheck() {
     if (paid) {
       Serial.println("[CHECK] PAGAMENTO CONFIRMADO!");
       desenharTelaPago();
+      if (origemBT) agendarResultadoBT("[BT] PAGAMENTO CONFIRMADO!");
       return;
     }
 
     Serial.println("[CHECK] Invoice ainda nao foi paga.");
     updateQRStatus("NAO PAGO AINDA", 0xFDA0);
+    if (origemBT) agendarResultadoBT("[BT] AINDA NAO PAGO.");
     return;
   }
 
@@ -631,6 +976,7 @@ void manualCheck() {
 
   http.end();
   updateQRStatus("ERRO: " + String(code), 0xF800);
+  if (origemBT) agendarResultadoBT("[BT] ERRO: HTTP " + String(code));
 }
 
 
@@ -642,17 +988,15 @@ void verificarPagamentoSilencioso() {
     return;
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(12000);
+  desligarBTParaTLS();   // garante heap livre (BT desligado) antes do HTTPS
 
+  WiFiClient plain;
+  WiFiClientSecure secure;
   HTTPClient http;
-  http.setTimeout(12000);
-  http.setReuse(false);
 
   String checkUrl = lnbits_url + "/" + current_payment_hash;
 
-  if (!http.begin(client, checkUrl)) {
+  if (!prepararHTTP(http, checkUrl, plain, secure, 12000)) {
     Serial.println("[AUTO-CHECK][ERRO] http.begin() falhou.");
     return;
   }
@@ -686,66 +1030,91 @@ void verificarPagamentoSilencioso() {
 }
 
 
-void mostrarInformacoesSistema() {
-  Serial.println("\n========== KIX POS / STATUS ==========");
+void mostrarInformacoesSistema(Print& out) {
+  out.println("\n========== KIX POS / STATUS ==========");
 
-  Serial.print("Estado: ");
+  out.print("Estado: ");
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("ONLINE");
+    out.println("ONLINE");
   } else {
-    Serial.println("OFFLINE");
+    out.println("OFFLINE");
   }
 
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
+  out.print("SSID: ");
+  out.println(WiFi.SSID());
 
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
+  out.print("IP: ");
+  out.println(WiFi.localIP());
 
-  Serial.print("Gateway: ");
-  Serial.println(WiFi.gatewayIP());
+  out.print("Gateway: ");
+  out.println(WiFi.gatewayIP());
 
-  Serial.print("Mascara: ");
-  Serial.println(WiFi.subnetMask());
+  out.print("Mascara: ");
+  out.println(WiFi.subnetMask());
 
-  Serial.print("DNS: ");
-  Serial.println(WiFi.dnsIP());
+  out.print("DNS: ");
+  out.println(WiFi.dnsIP());
 
-  Serial.print("MAC: ");
-  Serial.println(WiFi.macAddress());
+  out.print("MAC: ");
+  out.println(WiFi.macAddress());
 
-  Serial.print("Sinal Wi-Fi (RSSI): ");
+  out.print("Sinal Wi-Fi (RSSI): ");
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
+    out.print(WiFi.RSSI());
+    out.println(" dBm");
   } else {
-    Serial.println("indisponivel");
+    out.println("indisponivel");
   }
 
-  Serial.print("Tempo ligado: ");
-  Serial.print(millis() / 1000);
-  Serial.println(" segundos");
+  out.print("Bluetooth: ");
+  if (!btHabilitado) {
+    out.println("DESLIGADO");
+  } else if (SerialBT.hasClient()) {
+    out.println("CONECTADO");
+  } else {
+    out.println("LIGADO / AGUARDANDO");
+  }
 
-  Serial.print("Heap livre: ");
-  Serial.print(ESP.getFreeHeap());
-  Serial.println(" bytes");
+  out.print("Tempo ligado: ");
+  out.print(millis() / 1000);
+  out.println(" segundos");
 
-  Serial.print("PSRAM livre: ");
-  Serial.print(ESP.getFreePsram());
-  Serial.println(" bytes");
+  out.print("Heap livre: ");
+  out.print(ESP.getFreeHeap());
+  out.println(" bytes");
 
-  Serial.print("LNbits endpoint: ");
-  Serial.println(lnbits_url);
+  out.print("Maior bloco livre: ");
+  out.print(ESP.getMaxAllocHeap());
+  out.println(" bytes");
 
-  Serial.print("Invoice ativa: ");
-  Serial.println(current_payment_hash.length() > 0 ? "SIM" : "NAO");
+  out.print("PSRAM livre: ");
+  out.print(ESP.getFreePsram());
+  out.println(" bytes");
 
-  Serial.println("======================================");
+  out.print("LNbits endpoint: ");
+  out.println(lnbits_url);
+  out.print("Transporte: ");
+  out.println(lnbits_url.startsWith("https://") ? "HTTPS/TLS (usa mais heap)" : "HTTP (leve, recomendado p/ Bluetooth)");
+
+  out.print("Invoice ativa: ");
+  out.println(current_payment_hash.length() > 0 ? "SIM" : "NAO");
+
+  out.println("======================================");
 }
 
 /* --- TRATAMENTO DE TOQUE CAPACITIVO (VERTICAL) --- */
 void tratarToque(int px, int py) {
   if (currentScreen == SCREEN_KEYPAD) {
+    // Botão BT (liga/desliga Bluetooth) — canto superior direito, antes do WIFI
+    if (py >= 6 && py <= 34 && px >= 98 && px < 168) {
+      alternarBluetooth();
+      return;
+    }
+    // Botão WIFI (configuração via AP mode) — canto superior direito
+    if (py >= 6 && py <= 34 && px >= 168) {
+      iniciarConfiguracaoWiFi();
+      return;
+    }
     // Linha 1: 1, 2, 3 (y: 130 a 172)
     if (py >= 130 && py < 174) {
       if (px < 79) adicionarDigito('1');
@@ -817,7 +1186,7 @@ void verificarTouch() {
 void setup() {
   Serial.begin(115200);
   delay(500); // Pequena pausa para estabilizar a Serial
-  
+
   Serial.println("\n[BOOT] Inicializando KIX POS...");
   Serial.println("[BOOT] Serial pronta em 115200 baud.");
   
@@ -835,115 +1204,130 @@ void setup() {
   tp.begin();
   tp.setRotation(ROTATION_NORMAL);
 
+  // Carrega URL/key/PIN salvos no NVS (fallback: hardcoded)
+  carregarConfigLNbits();
+
+  // Liga o Bluetooth SPP com o PIN carregado ("KIX-POS", PIN padrão "1234")
+  iniciarBluetooth();
+
   connectWiFi();
 }
 
 /* --- VARIÁVEL GLOBAL PARA O TIMER DE DEBUG --- */
 unsigned long lastDebugPrintTime = 0;
 
+/* --- INTERFACE SERIAL (USB + BLUETOOTH) --- */
+// Despacha um comando de texto (mesma sintaxe do terminal serial) para a ação
+// correspondente. "out" é o stream de resposta (Serial ou SerialBT).
+void despacharComando(const String& input, Print& out) {
+  // I:VALOR - criar invoice
+  if (input.startsWith("I:")) {
+    String valor = input.substring(2);
+    valor.trim();
+    long sats = valor.toInt();
+
+    if (sats > 0) {
+      bool origemBT = (&out == (Print*)&SerialBT);
+      solicitarInvoice(sats, origemBT);
+      // No BT a resposta é adiada para a reconexão (o BT foi desligado acima).
+      // Aqui respondemos imediatamente apenas quando o comando veio do USB.
+      if (!origemBT) {
+        out.println(current_bolt11.length() > 0
+          ? "[OK] Invoice criada. Envie 'P' para copiar o BOLT11."
+          : "[ERRO] Falha ao criar invoice.");
+      }
+    } else {
+      out.println("[ERRO] Valor de sats invalido.");
+    }
+  }
+  // C ou C: - verificar pagamento
+  else if (input.equalsIgnoreCase("C") || input.equalsIgnoreCase("C:")) {
+    manualCheck(&out == (Print*)&SerialBT);
+  }
+  // L ou L: - consultar saldo
+  else if (input.equalsIgnoreCase("L") || input.equalsIgnoreCase("L:")) {
+    checkBalance(&out == (Print*)&SerialBT);
+  }
+  // P ou P: - imprimir a invoice BOLT11 ativa (útil para copiar no terminal BT)
+  else if (input.equalsIgnoreCase("P") || input.equalsIgnoreCase("P:")) {
+    if (current_bolt11.length() > 0) {
+      out.println("\n--- START BOLT11 ---");
+      out.print(current_bolt11);
+      out.println("\n--- END BOLT11 ---");
+    } else {
+      out.println("[!] Nenhuma invoice ativa.");
+    }
+  }
+  // H - voltar para a tela inicial
+  else if (input.equalsIgnoreCase("H")) {
+    input_amount = "";
+    current_payment_hash = "";
+    current_bolt11 = "";
+    desenharTelaTeclado();
+    out.println("[OK] Tela inicial.");
+  }
+  // H: - mostrar informações do sistema
+  else if (input.equalsIgnoreCase("H:")) {
+    mostrarInformacoesSistema(out);
+  }
+  // help - listar os comandos disponíveis
+  else if (input.equalsIgnoreCase("help")) {
+    out.println("\n[HELP] Comandos disponiveis:");
+    out.println("  I:VALOR  - criar invoice (ex.: I:1500)");
+    out.println("  C        - verificar pagamento da invoice ativa");
+    out.println("  L        - consultar saldo da carteira");
+    out.println("  P        - imprimir o BOLT11 ativo (para copiar)");
+    out.println("  H        - voltar para a tela inicial");
+    out.println("  H:       - status do sistema (Wi-Fi, IP, BT, heap)");
+    out.println("  help     - esta lista de comandos");
+  }
+  else {
+    out.println("[SERIAL] Comando desconhecido.");
+    out.println("Comandos: H, H:, I:1500, C, L, P, help");
+  }
+}
+
+// Lê uma linha terminada por \n ou \r de "in" e a despacha para "out".
+// Mantém o estado do buffer em "buffer" (deve ser estático/persistente por stream).
+void lerComando(Stream& in, String& buffer, Print& out) {
+  while (in.available() > 0) {
+    char c = in.read();
+
+    if (c == '\n' || c == '\r') {
+      buffer.trim();
+      if (buffer.length() > 0) {
+        out.print("\n[SERIAL RX] Comando: [");
+        out.print(buffer);
+        out.println("]");
+        despacharComando(buffer, out);
+      }
+      buffer = "";
+    }
+    else if (c >= 32 && c <= 126) {
+      if (buffer.length() < 64) {
+        buffer += c;
+      } else {
+        out.println("[ERRO] Comando muito longo; descartado.");
+        buffer = "";
+      }
+    }
+  }
+}
+
 /* --- LOOP PRINCIPAL --- */
 
 void loop() {
 
   // =====================================================
-  // 1. RECEPCAO SERIAL - NAO BLOQUEANTE
+  // 1. RECEPCAO SERIAL (USB + BLUETOOTH) - NAO BLOQUEANTE
   // =====================================================
 
-  static String serialInput = "";
+  static String usbInput = "";
+  static String btInput = "";
 
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-
-    if (c == '\n' || c == '\r') {
-      serialInput.trim();
-
-      if (serialInput.length() > 0) {
-        Serial.print("\n[SERIAL RX] Comando recebido: [");
-        Serial.print(serialInput);
-        Serial.println("]");
-
-        // I:VALOR - criar invoice
-        if (serialInput.startsWith("I:")) {
-          String valor = serialInput.substring(2);
-          valor.trim();
-          long sats = valor.toInt();
-
-          if (sats > 0) {
-            current_sats = sats;
-            Serial.println("[SERIAL] ANTES de createInvoice()");
-            Serial.flush();
-
-            createInvoice(current_sats);
-
-            Serial.println("[SERIAL] DEPOIS de createInvoice()");
-            Serial.flush();
-          } else {
-            Serial.println("[ERRO] Valor de sats invalido.");
-          }
-        }
-
-        // C ou C: - verificar pagamento
-        else if (
-          serialInput.equalsIgnoreCase("C") ||
-          serialInput.equalsIgnoreCase("C:")
-        ) {
-          Serial.println("[SERIAL] ANTES de manualCheck()");
-          Serial.flush();
-
-          manualCheck();
-
-          Serial.println("[SERIAL] DEPOIS de manualCheck()");
-          Serial.flush();
-        }
-
-        // L ou L: - consultar saldo
-        else if (
-          serialInput.equalsIgnoreCase("L") ||
-          serialInput.equalsIgnoreCase("L:")
-        ) {
-          Serial.println("[SERIAL] ANTES de checkBalance()");
-          Serial.flush();
-
-          checkBalance();
-
-          Serial.println("[SERIAL] DEPOIS de checkBalance()");
-          Serial.flush();
-        }
-
-        // H - voltar para a tela inicial
-        else if (serialInput.equalsIgnoreCase("H")) {
-          Serial.println("[SERIAL] Voltando para tela inicial...");
-
-          input_amount = "";
-          current_payment_hash = "";
-          current_bolt11 = "";
-
-          desenharTelaTeclado();
-
-          Serial.println("[SERIAL] Tela inicial exibida.");
-        }
-
-        // H: - mostrar informacoes uteis do sistema
-        else if (serialInput.equalsIgnoreCase("H:")) {
-          mostrarInformacoesSistema();
-        }
-
-        else {
-          Serial.println("[SERIAL] Comando desconhecido.");
-          Serial.println("Comandos: H, H:, I:1500, C, L");
-        }
-
-        serialInput = "";
-      }
-    }
-    else if (c >= 32 && c <= 126) {
-      if (serialInput.length() < 64) {
-        serialInput += c;
-      } else {
-        Serial.println("[ERRO] Comando serial muito longo; descartado.");
-        serialInput = "";
-      }
-    }
+  lerComando(Serial, usbInput, Serial);
+  if (btHabilitado) {
+    lerComando(SerialBT, btInput, SerialBT);
   }
 
 
@@ -970,7 +1354,8 @@ void loop() {
 
   if (
     currentScreen == SCREEN_QR_CODE &&
-    current_payment_hash != ""
+    current_payment_hash != "" &&
+    (autoCheckAte == 0 || millis() < autoCheckAte)
   ) {
     if (millis() - lastAutoCheckTime >= 3000) {
       lastAutoCheckTime = millis();
@@ -991,5 +1376,35 @@ void loop() {
 
       desenharTelaTeclado();
     }
+  }
+
+
+  // =====================================================
+  // 6. RELIGAR BLUETOOTH AUTOMATICAMENTE (SÓ OPERAÇÕES VIA BT)
+  // =====================================================
+
+  if (btAutoReligarEm != 0 && millis() >= btAutoReligarEm) {
+    btAutoReligarEm = 0;
+    if (!btHabilitado) {
+      iniciarBluetooth();
+      Serial.println("[BT] Operacao via BT: religando Bluetooth apos 10s.");
+    }
+  }
+
+
+  // =====================================================
+  // 7. REPORTAR RESULTADO AO RECONECTAR (BT)
+  // =====================================================
+
+  if (relatorioBTpendente && btHabilitado && SerialBT.hasClient()) {
+    relatorioBTpendente = false;
+    if (relatorioBTTexto.length() > 0) {
+      SerialBT.println("\n[BT] === RESULTADO ===");
+      SerialBT.println(relatorioBTTexto);
+      relatorioBTTexto = "";
+    } else {
+      reportarStatusInvoiceBT();
+    }
+    SerialBT.println("[BT] Comandos: I:VALOR, C, L, P, H, help.");
   }
 }

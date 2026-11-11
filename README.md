@@ -44,7 +44,7 @@ A **Lightning Network point-of-sale (PoS) terminal** for the **ESP32**. It uses 
 | Touch RST         | 25   |
 
 The display driver is configured in
-[`libraries/TFT_eSPI/User_Setup.h`](libraries/TFT_eSPI/User_Setup.h) (`ST7789_DRIVER`,
+[`pos_kix_capacitivo_tamc_gt911/libraries/TFT_eSPI/User_Setup.h`](pos_kix_capacitivo_tamc_gt911/libraries/TFT_eSPI/User_Setup.h) (`ST7789_DRIVER`,
 240×320). The firmware sets `tft.setRotation(2)` for portrait orientation.
 
 ---
@@ -52,18 +52,20 @@ The display driver is configured in
 ## Repository structure
 
 ```
-pos_kix_capacitivo_tamc_gt911/
-├── pos_kix_capacitivo_tamc_gt911.ino   # main firmware
-├── qrcode.c / qrcode.h                 # local QR-code generator (MIT)
-├── README.md
-├── architecture.md                     # detailed architecture (EN)
-├── arquitetura.md                      # detailed architecture (PT-BR)
-└── libraries/                          # vendored libraries
-    ├── ArduinoJson/     7.3.0          # JSON parsing/serialization
-    ├── TFT_eSPI/        2.5.43         # display driver
-    ├── TAMC_GT911/      1.0.2          # GT911 touch driver
-    ├── QRCode/          0.0.1          # QR (alternative; firmware uses qrcode.c)
-    └── WiFiManager/     2.0.17         # (bundled, not used by this firmware)
+.
+├── README.md                               # this file
+├── comandos_arduino_cli_gravar.txt         # original arduino-cli commands (PT-BR)
+└── pos_kix_capacitivo_tamc_gt911/          # Arduino sketch (folder name == .ino name)
+    ├── pos_kix_capacitivo_tamc_gt911.ino   # main firmware
+    ├── qrcode.c / qrcode.h                 # local QR-code generator (MIT)
+    ├── architecture.md                     # detailed architecture (EN)
+    ├── arquitetura.md                      # detailed architecture (PT-BR)
+    └── libraries/                          # vendored libraries
+        ├── ArduinoJson/     7.3.0          # JSON parsing/serialization
+        ├── TFT_eSPI/        2.5.43         # display driver
+        ├── TAMC_GT911/      1.0.2          # GT911 touch driver
+        ├── QRCode/          0.0.1          # QR (alternative; firmware uses qrcode.c)
+        └── WiFiManager/     2.0.17         # (bundled, not used by this firmware)
 ```
 
 > `WiFiManager` is included in the folder but is **not** used by the current
@@ -96,7 +98,7 @@ arduino-cli core update-index
 arduino-cli core install esp32:esp32
 ```
 
-The libraries are vendored in `libraries/`, so you do **not** need
+The libraries are vendored in `pos_kix_capacitivo_tamc_gt911/libraries/`, so you do **not** need
 `arduino-cli lib install`.
 
 ### 3. Configure credentials
@@ -194,7 +196,7 @@ arduino-cli compile \
 ```
 
 The original one-line command reference is also kept in
-[`comandos_arduino_cli_gravar.txt`](../comandos_arduino_cli_gravar.txt) (PT-BR).
+[`comandos_arduino_cli_gravar.txt`](comandos_arduino_cli_gravar.txt) (PT-BR).
 
 ---
 
@@ -271,7 +273,8 @@ All requests authenticate with the `X-Api-Key` header.
 > secrets to config/NVS.
 
 For a full walkthrough (ASCII diagrams, function reference, security notes), see
-[`architecture.md`](architecture.md) (EN) or [`arquitetura.md`](arquitetura.md) (PT-BR).
+[`pos_kix_capacitivo_tamc_gt911/architecture.md`](pos_kix_capacitivo_tamc_gt911/architecture.md) (EN) or
+[`pos_kix_capacitivo_tamc_gt911/arquitetura.md`](pos_kix_capacitivo_tamc_gt911/arquitetura.md) (PT-BR).
 
 ---
 
@@ -279,5 +282,5 @@ For a full walkthrough (ASCII diagrams, function reference, security notes), see
 
 The main firmware and bundled `qrcode.c` (based on Nayuki's QR-Code-generator) are
 provided under the MIT license. Individual vendored libraries retain their own
-licenses (see each `libraries/*` folder). Add a top-level `LICENSE` file if you
+licenses (see each `pos_kix_capacitivo_tamc_gt911/libraries/*` folder). Add a top-level `LICENSE` file if you
 plan to distribute this project.

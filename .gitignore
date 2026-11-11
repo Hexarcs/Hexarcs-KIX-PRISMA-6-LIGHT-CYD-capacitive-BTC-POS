@@ -1,0 +1,22 @@
+# Arduino build output
+build_output/
+build/
+*.bin
+*.elf
+*.map
+*.hex
+*.o
+*.d
+
+# Arduino CLI / core caches
+.arduino/
+arduino-cli.yaml
+
+# Editors / IDE
+.vscode/
+*.code-workspace
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -8,8 +8,8 @@
 #include "qrcode.h"
 
 /* --- CONFIGURAÇÃO WI-FI E LNBITS --- */
-const char* ssid = "TP-Link_46C2";
-const char* password = "80165897";
+const char* ssid = "Vinicius";
+const char* password = "@V112233r";
 
 String lnbits_url = "https://engine-1.hexarcs.com/api/v1/payments";
 String lnbits_wallet_url = "https://engine-1.hexarcs.com/api/v1/wallet";

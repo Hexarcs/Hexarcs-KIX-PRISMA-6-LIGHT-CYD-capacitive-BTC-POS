@@ -142,6 +142,7 @@ arduino-cli compile \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
   --libraries pos_kix_capacitivo_tamc_gt911/libraries \
   --jobs 4 \
+  --verbose \
   --build-property compiler.c.extra_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-implicit-function-declaration" \
   pos_kix_capacitivo_tamc_gt911
 ```
@@ -155,6 +156,7 @@ arduino-cli compile \
 
 ```bash
 arduino-cli upload \
+  --verbose \
   -p /dev/ttyUSB0 \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
   pos_kix_capacitivo_tamc_gt911
@@ -169,9 +171,11 @@ arduino-cli compile \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
   --libraries pos_kix_capacitivo_tamc_gt911/libraries \
   --jobs 4 \
+  --verbose \
   --build-property compiler.c.extra_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-implicit-function-declaration" \
   pos_kix_capacitivo_tamc_gt911 \
 && arduino-cli upload \
+  --verbose \
   -p /dev/ttyUSB0 \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
   pos_kix_capacitivo_tamc_gt911
@@ -190,6 +194,7 @@ arduino-cli compile \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
   --libraries pos_kix_capacitivo_tamc_gt911/libraries \
   --jobs 4 \
+  --verbose \
   --build-property compiler.c.extra_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-implicit-function-declaration" \
   --output-dir ./build_output \
   pos_kix_capacitivo_tamc_gt911

@@ -1,7 +1,18 @@
+# =============================================================
+# COMANDOS ARDUINO CLI — KIX POS  (verbose)
+# =============================================================
+# Execute SEMPRE a partir da RAIZ do repositório, onde fica a
+# pasta pos_kix_capacitivo_tamc_gt911/:
+#
+#     cd ~/pos_kix_capacitivo_tamc_gt911
+#
+# (NÃO rode de dentro de ~ nem de dentro da pasta do sketch)
+# =============================================================
+
 # === COMPILAR ===
 arduino-cli compile \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
-  --libraries ./libraries \
+  --libraries pos_kix_capacitivo_tamc_gt911/libraries \
   --jobs 4 \
   --build-property compiler.c.extra_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-implicit-function-declaration" \
   --verbose \
@@ -11,12 +22,13 @@ arduino-cli compile \
 arduino-cli upload \
   -p /dev/ttyUSB0 \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+  --verbose \
   pos_kix_capacitivo_tamc_gt911
 
 # === COMPILAR E GRAVAR EM UMA SÓ LINHA ===
 arduino-cli compile \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
-  --libraries ./libraries \
+  --libraries pos_kix_capacitivo_tamc_gt911/libraries \
   --jobs 4 \
   --build-property compiler.c.extra_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-implicit-function-declaration" \
   --verbose \
@@ -25,6 +37,7 @@ arduino-cli compile \
 arduino-cli upload \
   -p /dev/ttyUSB0 \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+  --verbose \
   pos_kix_capacitivo_tamc_gt911
 
 # === MONITOR SERIAL ===
@@ -34,9 +47,11 @@ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
 arduino-cli compile \
   --verbose \
   --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
-  --libraries ./libraries \
+  --libraries pos_kix_capacitivo_tamc_gt911/libraries \
   --jobs 4 \
   --build-property compiler.c.extra_flags="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-implicit-function-declaration" \
   --output-dir ./build_output \
   pos_kix_capacitivo_tamc_gt911
 
+# Dica: se aparecer erro "... .d: No such file or directory", rode:
+#     arduino-cli cache clean

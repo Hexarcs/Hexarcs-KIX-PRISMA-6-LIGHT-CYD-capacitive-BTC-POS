@@ -1,3 +1,5 @@
+> 🇧🇷 [Leia em português](README.pt-BR.md)
+
 # KIX POS
 
 A **Lightning Network point-of-sale (PoS) terminal** for the **ESP32**. It uses a

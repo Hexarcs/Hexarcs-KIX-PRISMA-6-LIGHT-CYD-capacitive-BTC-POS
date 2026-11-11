@@ -1,3 +1,5 @@
+> 🇬🇧 [Read in English](architecture.md)
+
 # KIX POS — Documentação da Arquitetura (PT-BR)
 
 > Documentação gerada a partir de `pos_kix_capacitivo_tamc_gt911.ino`.
@@ -115,27 +117,36 @@ global `currentScreen` (linhas 31–40):
 
 ### 3.2 Fluxo principal (`loop`)
 
-O `loop()` é **não-bloqueante** e executa 5 etapas a cada iteração (linhas 846–995):
+O `loop()` é **não-bloqueante** e executa sete fases a cada iteração (linhas 846–995):
 
 ```
    ┌──────────────────────────────────────────────────────────────┐
+   │                                                              │
    │                            loop()                            │
    │                                                              │
-   │  1. RECEPÇÃO SERIAL  (non-blocking, lê UART, dispatch)       │
+   │  1. RECEPÇÃO SERIAL   (não-bloqueante, UART + BT SPP)        │
    │          │                                                   │
    │          ▼                                                   │
-   │  2. TOUCH            (debounce 180 ms + hit-test)            │
+   │  2. TOUCH             (debounce 180 ms + hit-test)           │
    │          │                                                   │
    │          ▼                                                   │
-   │  3. DEBUG            (heartbeat a cada 30 s no Serial)       │
+   │  3. DEBUG             (heartbeat a cada 30 s no Serial)      │
    │          │                                                   │
    │          ▼                                                   │
-   │  4. AUTO-CHECK       (a cada 3 s se estiver em QR_CODE)      │
+   │  4. AUTO-CHECK        (a cada 3 s se estiver em QR_CODE)     │
    │          │                                                   │
    │          ▼                                                   │
-   │  5. AUTO-RETORNO     (5 s depois de PAID → volta ao keypad)  │
+   │  5. AUTO-RETORNO      (5 s após PAID → volta ao teclado)     │
+   │          │                                                   │
+   │          ▼                                                   │
+   │  6. RE-LIGAR BT       (operação via BT → +10 s)              │
+   │          │                                                   │
+   │          ▼                                                   │
+   │  7. RELATÓRIO BT      (reconectar → PAGO + BOLT11)           │
    └──────────────────────────────────────────────────────────────┘
 ```
+
+As fases 6 e 7 se aplicam apenas a operações solicitadas via **Bluetooth**: a fase 6 religa o Bluetooth após 10 s (e, para invoices, também encerra o auto-check aos 10 s — touch/USB continuam verificando), e a fase 7 reporta o resultado (`PAGO` / não pago + BOLT11) ao cliente assim que ele reconecta.
 
 Timers usados (variáveis globais `unsigned long`, linhas 48–51):
 

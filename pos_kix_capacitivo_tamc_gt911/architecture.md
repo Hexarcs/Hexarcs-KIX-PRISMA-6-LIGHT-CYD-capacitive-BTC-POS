@@ -1,29 +1,31 @@
-# KIX POS — Documentação da Arquitetura
+> 🇧🇷 [Leia em português](arquitetura.md)
 
-> Documentação gerada a partir de `pos_kix_capacitivo_tamc_gt911.ino`.
-> O firmware implementa um **ponto de venda (PDV) Lightning Network** sobre um
-> **ESP32**, usando tela TFT 240×320 (portrait), touch capacitivo **GT911** e a
-> API da **LNbits** para gerar/verificar faturas (invoices) BOLT11.
+# KIX POS — Architecture Documentation
 
----
-
-## 1. Visão geral
-
-O aparelho é um terminal de pagamento Lightning:
-
-1. O operador digita o valor em **sats** no teclado virtual.
-2. O firmware chama a LNbits para **criar uma invoice** (BOLT11).
-3. A invoice é exibida como **QR Code** na tela.
-4. O cliente paga com a carteira Lightning (escaneando o QR).
-5. O firmware **consulta a invoice a cada 3 s** até detectar o pagamento.
-6. Ao confirmar, mostra a tela **"PAGO COM SUCESSO!"** e volta ao teclado.
-
-Além da interface touch, existe uma **interface serial** (UART) para controlar o
-mesmo fluxo por comandos de texto.
+> Documentation generated from `pos_kix_capacitivo_tamc_gt911.ino`.
+> The firmware implements a **Lightning Network point-of-sale (PoS)** on an
+> **ESP32**, using a 240×320 TFT display (portrait), a **GT911** capacitive
+> touchscreen and the **LNbits** API to create/verify BOLT11 invoices.
 
 ---
 
-## 2. Stack de hardware
+## 1. Overview
+
+The device is a Lightning payment terminal:
+
+1. The operator types the amount in **sats** on the on-screen keypad.
+2. The firmware calls LNbits to **create an invoice** (BOLT11).
+3. The invoice is shown as a **QR code** on the display.
+4. The customer pays with a Lightning wallet (scanning the QR).
+5. The firmware **polls the invoice every 3 s** until it detects the payment.
+6. On confirmation, it shows the **"PAGO COM SUCESSO!"** screen and returns to the keypad.
+
+Besides the touch interface, there is a **serial interface** (UART) to control the
+same flow via text commands.
+
+---
+
+## 2. Hardware stack
 
 ```
                         +----------------------------------------+
@@ -48,38 +50,38 @@ mesmo fluxo por comandos de texto.
    └───────────────┘        └───────────────┘        └───────────────┘
 ```
 
-| Recurso           | Configuração                                      | Pinos            |
-|-------------------|---------------------------------------------------|------------------|
-| Display           | `TFT_eSPI`, rotação `2` (portrait), 240×320       | via SPI + `TFT_BL` |
-| Touch capacitivo  | `TAMC_GT911`, 240×320                             | SDA=33, SCL=32, INT=21, RST=25 |
-| Rede              | Wi-Fi + `HTTPClient` (`WiFiClient`/`WiFiClientSecure` adaptativo) | — |
-| Bluetooth         | `BluetoothSerial` (SPP), pareamento Just Works    | —                |
-| JSON              | `ArduinoJson`                                     | —                |
-| QR Code           | `qrcode.h` (versão 14, `ECC_LOW`)                 | —                |
+| Resource          | Configuration                                        | Pins                        |
+|-------------------|------------------------------------------------------|-----------------------------|
+| Display           | `TFT_eSPI`, rotation `2` (portrait), 240×320         | via SPI + `TFT_BL`          |
+| Capacitive touch  | `TAMC_GT911`, 240×320                                | SDA=33, SCL=32, INT=21, RST=25 |
+| Network           | Wi-Fi + `HTTPClient` (adaptive `WiFiClient`/`WiFiClientSecure`) | —             |
+| Bluetooth         | `BluetoothSerial` (SPP), Just Works pairing          | —                           |
+| JSON              | `ArduinoJson`                                        | —                           |
+| QR code           | `qrcode.h` (version 14, `ECC_LOW`)                   | —                           |
 
-> O transporte é escolhido pela URL: `http://` usa `WiFiClient` (leve) e `https://`
-> usa `WiFiClientSecure` com `setInsecure()` (sem validar o certificado — modo de
-> diagnóstico). **HTTPS + Bluetooth ligado pode estourar o heap do ESP32** e fazer
-> a criação de invoice falhar; para usar Bluetooth e invoice ao mesmo tempo, use um
-> endpoint `http://` (como o projeto baremetal) ou desligue o BT.
+> The transport is chosen by the URL: `http://` uses `WiFiClient` (lightweight)
+> and `https://` uses `WiFiClientSecure` with `setInsecure()` (no certificate
+> validation — diagnostic mode). **HTTPS + Bluetooth on can exhaust the ESP32's
+> heap** and make invoice creation fail; to use Bluetooth and invoices at the same
+> time, point at an `http://` endpoint (like the baremetal project) or turn BT off.
 
 ---
 
-## 3. Arquitetura de software
+## 3. Software architecture
 
-### 3.1 Máquina de estados (telas)
+### 3.1 State machine (screens)
 
-O firmware é dirigido por uma **enum de estados** (`ScreenState`) e uma variável
-global `currentScreen` (linhas 31–40):
+The firmware is driven by a **state enum** (`ScreenState`) and a global variable
+`currentScreen` (lines 31–40):
 
 ```
                  ┌──────────────┐
-    boot ──────► │ CONNECTING   │  conecta Wi-Fi (15 s timeout)
+    boot ──────► │ CONNECTING   │  connects Wi-Fi (15 s timeout)
                  └──────┬───────┘
-                        │ (sempre)
+                        │ (always)
                         ▼
                  ┌──────────────┐
-         ┌──────►│   KEYPAD     │  entrada do valor em sats
+         ┌──────►│   KEYPAD     │  amount entry in sats
          │       └──────┬───────┘
          │              │ OK / "I:VALOR"
          │              ▼
@@ -92,120 +94,129 @@ global `currentScreen` (linhas 31–40):
          │  ┌──────────┐  ┌──────────┐
          │  │ QR_CODE  │  │  ERROR   │  HTTP/JSON/offline
          │  └────┬─────┘  └────┬─────┘
-         │       │ pagamento    │ VOLTAR / toque
-         │       │ confirmado   │
+         │       │ payment     │ BACK / tap
+         │       │ confirmed   │
          │       ▼             │
          │  ┌──────────┐       │
          │  │  PAID    │       │
          │  └────┬─────┘       │
-         │       │ 5 s / toque │
+         │       │ 5 s / tap   │
          └───────┴─────────────┘
 ```
 
-| Estado              | Tela                               | Função que desenha          |
-|---------------------|------------------------------------|-----------------------------|
-| `SCREEN_CONNECTING` | "Conectando WiFi…"                 | `connectWiFi()`             |
-| `SCREEN_KEYPAD`     | Teclado numérico 3×4               | `desenharTelaTeclado()`     |
-| `SCREEN_LOADING`    | "CRIANDO INVOICE…"                 | `desenharTelaCarregando()`  |
-| `SCREEN_QR_CODE`    | QR Code da invoice + valor         | `desenharTelaQRCode()`      |
-| `SCREEN_PAID`       | "PAGO COM SUCESSO!"                | `desenharTelaPago()`        |
-| `SCREEN_ERROR`      | Título + detalhe + botão VOLTAR    | `desenharTelaErro()`        |
+| State               | Screen                            | Drawing function           |
+|---------------------|-----------------------------------|----------------------------|
+| `SCREEN_CONNECTING` | "Conectando WiFi…"                | `connectWiFi()`            |
+| `SCREEN_KEYPAD`     | 3×4 numeric keypad                | `desenharTelaTeclado()`    |
+| `SCREEN_LOADING`    | "CRIANDO INVOICE…"                | `desenharTelaCarregando()` |
+| `SCREEN_QR_CODE`    | Invoice QR code + value           | `desenharTelaQRCode()`     |
+| `SCREEN_PAID`       | "PAGO COM SUCESSO!"               | `desenharTelaPago()`       |
+| `SCREEN_ERROR`      | Title + detail + VOLTAR button    | `desenharTelaErro()`       |
 
 ---
 
-### 3.2 Fluxo principal (`loop`)
+### 3.2 Main flow (`loop`)
 
-O `loop()` é **não-bloqueante** e executa 5 etapas a cada iteração (linhas 846–995):
+The `loop()` is **non-blocking** and runs seven phases every iteration (lines 846–995):
 
 ```
    ┌──────────────────────────────────────────────────────────────┐
+   │                                                              │
    │                            loop()                            │
    │                                                              │
-   │  1. RECEPÇÃO SERIAL  (non-blocking, lê UART, dispatch)       │
+   │  1. SERIAL RECEPTION  (non-blocking, UART + BT SPP)          │
    │          │                                                   │
    │          ▼                                                   │
-   │  2. TOUCH            (debounce 180 ms + hit-test)            │
+   │  2. TOUCH             (180 ms debounce + hit-test)           │
    │          │                                                   │
    │          ▼                                                   │
-   │  3. DEBUG            (heartbeat a cada 30 s no Serial)       │
+   │  3. DEBUG             (heartbeat every 30 s on Serial)       │
    │          │                                                   │
    │          ▼                                                   │
-   │  4. AUTO-CHECK       (a cada 3 s se estiver em QR_CODE)      │
+   │  4. AUTO-CHECK        (every 3 s if on QR_CODE)              │
    │          │                                                   │
    │          ▼                                                   │
-   │  5. AUTO-RETORNO     (5 s depois de PAID → volta ao keypad)  │
+   │  5. AUTO-RETURN       (5 s after PAID → back to keypad)      │
+   │          │                                                   │
+   │          ▼                                                   │
+   │  6. BT AUTO-REENABLE  (BT-originated op → +10 s)             │
+   │          │                                                   │
+   │          ▼                                                   │
+   │  7. BT REPORT         (reconnect → PAGO + BOLT11)            │
    └──────────────────────────────────────────────────────────────┘
 ```
 
-Timers usados (variáveis globais `unsigned long`, linha 48–51):
+Phases 6 and 7 only apply to operations requested over **Bluetooth**: phase 6 turns Bluetooth back on after 10 s (and, for invoices, also stops the auto-check at 10 s — touch/USB keep auto-checking), and phase 7 reports the result (`PAGO` / not-paid + BOLT11) to the client once it reconnects.
 
-| Timer              | Intervalo | Uso                                            |
-|--------------------|-----------|------------------------------------------------|
-| `lastTouchTime`    | 180 ms    | Debounce do touch                              |
-| `lastAutoCheckTime`| 3000 ms   | Poll da invoice na tela QR                     |
-| `paidScreenTime`   | 5000 ms   | Retorno automático após pagamento              |
-| `lastDebugPrintTime`| 30000 ms | Heartbeat de debug no Serial                   |
+Timers used (global `unsigned long` variables, lines 48–51):
+
+| Timer                | Interval | Use                                          |
+|----------------------|----------|----------------------------------------------|
+| `lastTouchTime`      | 180 ms   | Touch debounce                                |
+| `lastAutoCheckTime`  | 3000 ms  | Invoice poll on the QR screen                 |
+| `paidScreenTime`     | 5000 ms  | Automatic return after payment                |
+| `lastDebugPrintTime` | 30000 ms | Debug heartbeat on Serial                     |
 
 ---
 
-## 4. Comunicação com a LNbits
+## 4. Communication with LNbits
 
-Endpoints (linhas 14–16):
+Endpoints (lines 14–16):
 
-| Operação        | Método | URL                                                        |
-|-----------------|--------|------------------------------------------------------------|
-| Criar invoice   | `POST` | `https://YOUR-LNBITS/api/v1/payments`             |
-| Verificar invoice| `GET` | `.../api/v1/payments/{payment_hash}`                       |
-| Saldo da carteira| `GET` | `https://YOUR-LNBITS/api/v1/wallet`               |
+| Operation          | Method | URL                                                        |
+|--------------------|--------|------------------------------------------------------------|
+| Create invoice     | `POST` | `https://YOUR-LNBITS/api/v1/payments`                      |
+| Verify invoice     | `GET`  | `.../api/v1/payments/{payment_hash}`                       |
+| Wallet balance     | `GET`  | `https://YOUR-LNBITS/api/v1/wallet`                        |
 
-Autenticação via header `X-Api-Key` (chave hardcoded, linha 16).
+Authentication via the `X-Api-Key` header (hardcoded key, line 16).
 
-### 4.1 Criação de invoice — `createInvoice(sats)`
+### 4.1 Invoice creation — `createInvoice(sats)`
 
 ```
   createInvoice(sats)
         │
-        ├─ Wi-Fi conectado? ── não ──► tela ERROR "SEM WIFI"
+        ├─ Wi-Fi connected? ── no ──► ERROR screen "SEM WIFI"
         │
         ├─ POST /api/v1/payments
         │     payload: {"out": false, "amount": sats, "memo": "KIX-POS"}
         │
-        ├─ HTTP 200/201? ── não ──► tela ERROR "HTTP <code>"
+        ├─ HTTP 200/201? ── no ──► ERROR screen "HTTP <code>"
         │
         ├─ parse JSON → payment_request (BOLT11) + payment_hash
         │
-        └─ desenharTelaQRCode()  (gera QR do BOLT11)
+        └─ desenharTelaQRCode()  (renders QR from BOLT11)
 ```
 
-### 4.2 Verificação de pagamento
+### 4.2 Payment verification
 
 ```
-   verificarPagamentoSilencioso()  (auto, a cada 3 s)
-   manualCheck()                   (botão CHECAR ou comando serial "C")
+   verificarPagamentoSilencioso()  (auto, every 3 s)
+   manualCheck()                   (CHECAR button or serial "C" command)
         │
         └─ GET /payments/{hash}
               │
-              ├─ 200 + paid==true ─► desenharTelaPago()
+              ├─ 200 + paid==true  ─► desenharTelaPago()
               ├─ 200 + paid==false ─► status "NAO PAGO AINDA"
-              └─ erro ─► status "ERRO: <code>"
+              └─ error             ─► status "ERRO: <code>"
 ```
 
-### 4.3 Consulta de saldo — `checkBalance()`
+### 4.3 Balance query — `checkBalance()`
 
-`GET /wallet` → extrai `balance_msat` → divide por 1000 → exibe "SALDO DA CARTEIRA".
+`GET /wallet` → extracts `balance_msat` → divides by 1000 → shows "SALDO DA CARTEIRA".
 
 ---
 
-## 5. Interface touch (GT911)
+## 5. Touch interface (GT911)
 
-- `verificarTouch()` lê `tp.points[0]`, faz debounce de 180 ms e aplica
-  `constrain` para o retângulo 240×320 (linhas 795–814).
-- `tratarToque(px, py)` faz o **hit-test** por região, dependendo da tela atual.
+- `verificarTouch()` reads `tp.points[0]`, applies 180 ms debounce and `constrain`s
+  to the 240×320 rectangle (lines 795–814).
+- `tratarToque(px, py)` does the **hit-test** by region, depending on the current screen.
 
-### 5.1 Teclado numérico (layout vertical 3×4)
+### 5.1 Numeric keypad (3×4 vertical layout)
 
-As coordenadas desenhadas (linhas 142–160) e o hit-test (linhas 747–772) devem
-bater entre si:
+The drawn coordinates (lines 142–160) and the hit-test (lines 747–772) must match
+each other:
 
 ```
       x:  0    79    156    240
@@ -220,38 +231,37 @@ bater entre si:
       └───────┴───────┴───────┘
 ```
 
-> ⚠️ **Observação:** as faixas de `y` do hit-test usam fronteiras levemente
-> diferentes das posições desenhadas (ex.: tecla "1" é desenhada em `y=130`
-> com altura 42 → termina em 172, mas o teste considera `130..173`). No geral
-> as regiões são contíguas, então o acerto é aceitável, mas há uma pequena
-> defasagem de 1–2 px em algumas bordas.
+> ⚠️ **Note:** the hit-test `y` ranges use slightly different boundaries than the
+> drawn positions (e.g. key "1" is drawn at `y=130` with height 42 → ends at 172,
+> but the test considers `130..173`). Overall the regions are contiguous, so the
+> hit accuracy is acceptable, but there is a small 1–2 px offset on some edges.
 
-### 5.2 Telas de QR / Paid / Error
+### 5.2 QR / Paid / Error screens
 
-| Tela          | Ação do toque                                   |
-|---------------|-------------------------------------------------|
-| `QR_CODE`     | `px<120` → `manualCheck()`; senão → volta ao teclado |
-| `PAID`/`ERROR`| Qualquer toque → limpa estado e volta ao teclado |
+| Screen         | Tap action                                             |
+|----------------|--------------------------------------------------------|
+| `QR_CODE`      | `px<120` → `manualCheck()`; otherwise → back to keypad |
+| `PAID`/`ERROR` | Any tap → clears state and returns to the keypad        |
 
 ---
 
-## 6. Interface serial (UART 115200 baud + Bluetooth SPP)
+## 6. Serial interface (UART 115200 baud + Bluetooth SPP)
 
-A mesma sintaxe é aceita pelo **USB serial** e por um terminal **Bluetooth SPP**
-(pareie com o dispositivo **`KIX-POS`**; pareamento "Just Works", sem PIN — o core
-3.x não suporta PIN fixo). Comandos terminados por `\n` ou `\r`:
+The same syntax is accepted by the **USB serial** and by a **Bluetooth SPP**
+terminal (pair with the device **`KIX-POS`**; "Just Works" pairing, no PIN — core
+3.x does not support a fixed PIN). Commands are terminated by `\n` or `\r`:
 
-| Comando       | Ação                                        | Função chamada            |
-|---------------|---------------------------------------------|---------------------------|
-| `I:<valor>`   | Cria invoice com o valor em sats           | `createInvoice()`         |
-| `C` / `C:`    | Verifica pagamento da invoice ativa        | `manualCheck()`           |
-| `L` / `L:`    | Consulta saldo da carteira                 | `checkBalance()`          |
-| `P` / `P:`    | Imprime a invoice BOLT11 ativa             | (direto no stream)        |
-| `H`           | Volta para a tela inicial (teclado)        | `desenharTelaTeclado()`   |
-| `H:`          | Mostra status do sistema                   | `mostrarInformacoesSistema()` |
-| `help`         | Lista os comandos disponíveis          | (direto no stream)        |
+| Command      | Action                                       | Function called            |
+|--------------|----------------------------------------------|----------------------------|
+| `I:<value>`  | Creates an invoice for the value in sats     | `createInvoice()`          |
+| `C` / `C:`   | Checks the active invoice's payment          | `manualCheck()`            |
+| `L` / `L:`   | Queries the wallet balance                   | `checkBalance()`           |
+| `P` / `P:`   | Prints the active BOLT11 invoice             | (directly on the stream)   |
+| `H`          | Returns to the home (keypad) screen          | `desenharTelaTeclado()`    |
+| `H:`         | Shows system status                          | `mostrarInformacoesSistema()` |
+| `help`       | Lists the available commands                 | (directly on the stream)   |
 
-Exemplo de fluxo serial:
+Example serial flow:
 
 ```
   > I:1500
@@ -265,90 +275,90 @@ Exemplo de fluxo serial:
 
 ---
 
-## 7. Referência de funções
+## 7. Function reference
 
-| Função                          | Papel                                                        |
-|---------------------------------|--------------------------------------------------------------|
-| `kickstartHardware()`           | Liga o backlight (`TFT_BL`) se definido                       |
-| `desenharBotao(...)`            | Desenha botão arredondado com texto centralizado              |
-| `atualizarVisor()`              | Redesenha o valor digitado no display do teclado              |
-| `desenharTelaTeclado()`         | Tela do teclado (header KIX POS + ON/OFFLINE + 3×4)           |
-| `desenharTelaCarregando()`      | Tela "CRIANDO INVOICE…"                                       |
-| `desenharTelaQRCode()`          | Gera/renderiza QR do BOLT11 + botões CHECAR/VOLTAR            |
-| `desenharTelaPago()`            | Tela verde de sucesso                                         |
-| `desenharTelaErro(titulo, det)` | Tela de erro com botão VOLTAR                                 |
-| `connectWiFi()`                 | Conecta ao Wi-Fi (timeout 15 s) e vai ao teclado              |
-| `iniciarConfiguracaoWiFi()` | Abre portal AP (WiFiManager) p/ Wi-Fi, API e PIN           |
-| `carregarConfigLNbits()`    | Carrega URL/key/PIN do NVS (fallback: hardcoded)           |
-| `salvarConfigLNbits()`      | Grava URL/key/PIN no NVS                                   |
-| `iniciarBluetooth()`        | Liga o Bluetooth SPP (pareamento Just Works, sem PIN)         |
-| `alternarBluetooth()`       | Liga/desliga o Bluetooth (botão BT) e redesenha o teclado   |
-| `prepararHTTP(...)`        | Escolhe `WiFiClient`/`WiFiClientSecure` conforme a URL       |
-| `desligarBTParaTLS(avisarVoltar10s)` | Desliga o BT (se ligado) antes de uma operação HTTPS; avisa "volte em 10s" se veio do BT          |
-| `solicitarInvoice(sats, origemBT)` | Desliga o BT, cria a invoice; religa em 10s (e encerra o auto-check) se veio do BT |
-| `reportarStatusInvoiceBT()`| Reporta PAGO / não pago + BOLT11 ao cliente BT reconectado    |
-| `agendarResultadoBT(msg)` | Agenda um resultado para enviar ao cliente BT após reconectar |
-| `checkBalance(origemBT)` | Consulta saldo da carteira; religa o BT em 10s se veio do BT                                   |
-| `createInvoice(sats)`           | Cria invoice na LNbits e mostra QR                            |
-| `manualCheck(origemBT)` | Verificação manual de pagamento; religa o BT em 10s se veio do BT                              |
-| `verificarPagamentoSilencioso()`| Poll automático de pagamento (silencioso)                    |
-| `adicionarDigito(c)` / `apagarDigito()` | Edição do valor no teclado                          |
-| `processarOK()`                 | Valida valor, salva `current_sats` e cria invoice            |
-| `tratarToque(px, py)`           | Hit-test do touch por tela                                   |
-| `verificarTouch()`              | Leitura + debounce do GT911                                  |
-| `mostrarInformacoesSistema(out)`| Dump de status (Wi-Fi, IP, Bluetooth, heap…) no stream       |
-| `despacharComando(input, out)`  | Roteia um comando serial para a ação correspondente          |
-| `lerComando(in, buf, out)`      | Lê uma linha de um stream (USB ou BT) e despacha             |
-
----
-
-## 8. Variáveis de estado globais
-
-| Variável                 | Tipo      | Descrição                                     |
-|--------------------------|-----------|-----------------------------------------------|
-| `currentScreen`          | enum      | Tela atual (máquina de estados)               |
-| `input_amount`           | `String`  | Valor sendo digitado (em sats)                |
-| `current_sats`           | `long`    | Valor da invoice ativa                        |
-| `current_payment_hash`   | `String`  | `payment_hash` da invoice ativa               |
-| `current_bolt11`         | `String`  | Invoice BOLT11 (exibida como QR)              |
-| `btHabilitado`           | `bool`    | Bluetooth ligado/desligado (botão BT)          |
-| `bt_pin`                 | `String`  | PIN de pareamento (salvo, não aplicado no core 3.x) |
-| `pagamentoConfirmado`    | `bool`    | resultado do último invoice (pago?)                 |
-| `relatorioBTpendente`    | `bool`    | há resultado a reportar ao cliente BT após reconectar |
-| `btAutoReligarEm`        | `unsigned long` | religa o BT automaticamente (só invoice via BT) |
-| `autoCheckAte`           | `unsigned long` | auto-check roda só até este instante (0 = sem limite; só invoice via BT tem limite) |
-| `bolt11Relatorio`        | `String`  | cópia do BOLT11 para o reporte pós-BT               |
-| `relatorioBTTexto`     | `String`  | resultado a reportar ao cliente BT após reconectar (C/L) |
+| Function                            | Role                                                        |
+|-------------------------------------|-------------------------------------------------------------|
+| `kickstartHardware()`               | Turns on the backlight (`TFT_BL`) if defined                |
+| `desenharBotao(...)`                | Draws a rounded button with centered text                   |
+| `atualizarVisor()`                  | Redraws the typed value on the keypad display               |
+| `desenharTelaTeclado()`             | Keypad screen (KIX POS header + ON/OFFLINE + 3×4)           |
+| `desenharTelaCarregando()`          | "CRIANDO INVOICE…" screen                                   |
+| `desenharTelaQRCode()`              | Renders the BOLT11 QR + CHECAR/VOLTAR buttons               |
+| `desenharTelaPago()`                | Green success screen                                        |
+| `desenharTelaErro(titulo, det)`     | Error screen with a VOLTAR button                           |
+| `connectWiFi()`                     | Connects to Wi-Fi (15 s timeout) and goes to the keypad     |
+| `iniciarConfiguracaoWiFi()`         | Opens the AP portal (WiFiManager) for Wi-Fi, API and PIN    |
+| `carregarConfigLNbits()`            | Loads URL/key/PIN from NVS (fallback: hardcoded)            |
+| `salvarConfigLNbits()`              | Saves URL/key/PIN to NVS                                    |
+| `iniciarBluetooth()`                | Turns on Bluetooth SPP (Just Works pairing, no PIN)         |
+| `alternarBluetooth()`               | Toggles Bluetooth (BT button) and redraws the keypad        |
+| `prepararHTTP(...)`                 | Picks `WiFiClient`/`WiFiClientSecure` based on the URL      |
+| `desligarBTParaTLS(avisarVoltar10s)` | Turns BT off (if on) before an HTTPS operation; warns "come back in 10s" if the request came from BT |
+| `solicitarInvoice(sats, origemBT)`  | Turns BT off, creates the invoice; re-enables in 10s (and stops auto-check) if from BT |
+| `reportarStatusInvoiceBT()`         | Reports PAID / not-paid + BOLT11 to the reconnected BT client |
+| `agendarResultadoBT(msg)`           | Schedules a result to send to the BT client after reconnect |
+| `checkBalance(origemBT)`            | Queries the wallet balance; re-enables BT in 10s if from BT |
+| `createInvoice(sats)`               | Creates the invoice on LNbits and shows the QR              |
+| `manualCheck(origemBT)`             | Manual payment check; re-enables BT in 10s if from BT       |
+| `verificarPagamentoSilencioso()`    | Automatic (silent) payment poll                            |
+| `adicionarDigito(c)` / `apagarDigito()` | Edit the value on the keypad                           |
+| `processarOK()`                     | Validates the value, saves `current_sats` and creates invoice |
+| `tratarToque(px, py)`               | Touch hit-test by screen                                    |
+| `verificarTouch()`                  | GT911 read + debounce                                       |
+| `mostrarInformacoesSistema(out)`    | Status dump (Wi-Fi, IP, Bluetooth, heap…) on the stream     |
+| `despacharComando(input, out)`      | Routes a serial command to the matching action              |
+| `lerComando(in, buf, out)`          | Reads a line from a stream (USB or BT) and dispatches       |
 
 ---
 
-## 9. Pontos de atenção / segurança
+## 8. Global state variables
 
-- **Credenciais hardcoded** (SSID, senha Wi-Fi e `X-Api-Key` da LNbits) estão no
-  código-fonte (linhas 11–16). Em produção, devem vir de config/NVS/secret store.
-- **TLS inseguro**: no modo `https://`, `client.setInsecure()` desabilita a
-  validação do certificado. O próprio código recomenda validar o certificado após
-  confirmar a comunicação. Para coexistir com o Bluetooth, prefira um endpoint
-  `http://` (veja a nota de heap na seção de recursos).
-- **`String` para concatenação de JSON**: o payload é montado manualmente
-  (linha 486). Usar `ArduinoJson` para serializar evitaria risco de injeção/corrupção
-  de formato (o valor vem de `long`, então o risco aqui é baixo).
-- **QR limitado a 450 caracteres** (linha 196): invoices BOLT11 mais longas são
-  recusadas com a mensagem "INVOICE MUITO LONGA".
-- **Limite de 8 dígitos** no teclado (`adicionarDigito`, linha 277).
+| Variable              | Type           | Description                                          |
+|-----------------------|----------------|------------------------------------------------------|
+| `currentScreen`       | enum           | Current screen (state machine)                       |
+| `input_amount`        | `String`       | Value being typed (in sats)                          |
+| `current_sats`        | `long`         | Active invoice value                                 |
+| `current_payment_hash`| `String`       | `payment_hash` of the active invoice                 |
+| `current_bolt11`      | `String`       | BOLT11 invoice (shown as QR)                         |
+| `btHabilitado`        | `bool`         | Bluetooth on/off (BT button)                         |
+| `bt_pin`              | `String`       | Pairing PIN (saved, not enforced on core 3.x)        |
+| `pagamentoConfirmado` | `bool`         | Result of the last invoice (paid?)                   |
+| `relatorioBTpendente` | `bool`         | there is a result to report to the BT client after reconnect |
+| `btAutoReligarEm`     | `unsigned long`| Re-enables BT automatically (BT-originated invoice only) |
+| `autoCheckAte`        | `unsigned long`| Auto-check runs only until this instant (0 = no limit; only BT-originated invoices have a limit) |
+| `bolt11Relatorio`     | `String`       | Copy of the BOLT11 for the post-BT report            |
+| `relatorioBTTexto`    | `String`       | Result to report to the BT client after reconnect (C/L) |
 
 ---
 
-## 10. Mapa de arquivos
+## 9. Notes / security
+
+- **Hardcoded credentials** (SSID, Wi-Fi password and LNbits `X-Api-Key`) are in the
+  source code (lines 11–16). In production they should come from config/NVS/secret store.
+- **Insecure TLS**: in `https://` mode, `client.setInsecure()` disables certificate
+  validation. The code itself recommends validating the certificate after confirming
+  the communication. To coexist with Bluetooth, prefer an `http://` endpoint (see the
+  heap note in the resources section).
+- **`String` JSON concatenation**: the payload is assembled manually (line 486). Using
+  `ArduinoJson` to serialize would avoid injection/format-corruption risk (the value
+  comes from a `long`, so the risk here is low).
+- **QR limited to 450 characters** (line 196): longer BOLT11 invoices are rejected with
+  the "INVOICE MUITO LONGA" message.
+- **8-digit limit** on the keypad (`adicionarDigito`, line 277).
+
+---
+
+## 10. File map
 
 ```
 pos_kix_capacitivo_tamc_gt911/
-├── pos_kix_capacitivo_tamc_gt911.ino   ← firmware principal (este documento)
-├── qrcode.c / qrcode.h                 ← biblioteca de QR Code local
+├── pos_kix_capacitivo_tamc_gt911.ino   ← main firmware (this document)
+├── qrcode.c / qrcode.h                 ← local QR-code library
 └── libraries/
-    ├── TFT_eSPI/        ← driver do display
-    ├── TAMC_GT911/      ← driver do touch capacitivo
-    ├── ArduinoJson/     ← parse/serialize JSON
-    ├── WiFiManager/     ← portal AP (botão WIFI) para configurar Wi-Fi
-    └── QRCode/          ← QR (alternativa à qrcode.c local)
+    ├── TFT_eSPI/        ← display driver
+    ├── TAMC_GT911/      ← capacitive touch driver
+    ├── ArduinoJson/     ← JSON parse/serialize
+    ├── WiFiManager/     ← AP portal (WIFI button) to configure Wi-Fi
+    └── QRCode/          ← QR (alternative to the local qrcode.c)
 ```
